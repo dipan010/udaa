@@ -1,55 +1,48 @@
-# Universal Digital Accessibility Agent (UDAA)
+UDAA Project Handoff Context
+Project Name: Universal Digital Accessibility Agent (UDAA) Current Status: Phase 10 Complete (Automated Live Browser Launching) Last Updated: 2026-03-10
 
-An AI-powered agent that autonomously navigates digital interfaces using the Gemini Computer Use API and provides real-time narration via the Gemini Live API.
+🚀 Mission Statement
+UDAA is a multimodal AI agent designed to assist users with accessibility needs by autonomously navigating digital interfaces. It observes the screen via real-time screenshots, processes the UI context using Gemini, and executes native browser actions (click, type, scroll).
 
-Built for the Gemini Live Agent Challenge under the UI Navigator category.
+🛠 Technical Architecture
+The system uses a Hybrid Minimal-GCP Architecture to minimize billing while maintaining scalability.
 
-## Features
+Backend: FastAPI (Python 3.11).
+Frontend: Next.js 15+ (TypeScript, Tailwind CSS).
+Browser Control: Playwright (for Remote mode) and a Custom Chrome Extension (for Live mode).
+AI Core:
+Action Engine: gemini-2.5-computer-use-preview-10-2025 (via google-genai SDK).
+Narration Engine: gemini-2.0-flash-exp (via Gemini Live API / Bidi streaming).
+State Management: Firestore (used for cross-instance session synchronization).
+Storage: Local filesystem (backend/screenshots/) and local logs (backend/actions.log).
+💡 Key Features & Recent Fixes (CRITICAL)
+1. Hands-Free Live Browser (Phase 10)
+Mechanism: The backend LiveBrowserAdapter spawns a persistent Chrome context with the UDAA extension pre-loaded.
+Auto-Handshake: Playwright injects udaa_session_id into the browser's localStorage. The extension's content_script.js detects this and triggers an automatic WebSocket connection.
+Restriction Note: Extensions cannot run on about:blank. Thus, the adapter defaults to https://www.google.com to ensure the handshake triggers.
+2. WebSocket Stability
+Memory Leak Fix: The useWebSocket.ts hook was patched to prevent reconnect loops by cleaning up event listeners (onclose, onerror) during unmount and using an intentionalClose ref.
+Port: Backend runs on :8080, Frontend on :3000.
+⚙️ Environment Configuration
+Next agents must ensure these are set in backend/.env:
 
-- **Autonomous UI Interaction**: Uses Playwright and `gemini-2.5-flash-preview-04-17` to click, type, scroll, and navigate purely from visual understanding.
-- **Live Narration**: Uses `gemini-2.5-flash` Live API to narrate what the agent is doing in real-time.
-- **Accessibility-First UI**: High-contrast, large font dark theme designed for non-technical users.
-- **Safety Driven**: Built-in "require_confirmation" handling for sensitive operations via a frontend modal.
-- **GCP Native**: Integrates with Cloud Storage (screenshots), Firestore (session state), Pub/Sub (action queue), and Cloud Logging.
+GOOGLE_API_KEY: Required for Gemini models.
+GOOGLE_CLOUD_PROJECT: udaa-489513 (for Firestore).
+COMPUTER_USE_MODEL: gemini-2.5-computer-use-preview-10-2025.
+LIVE_MODEL: gemini-2.0-flash-exp (Do NOT use gemini-2.5-flash for Live API as it lacks Bidi support in current v1beta).
+📂 Directory Structure
+/backend: FastAPI source, venv, requirements.
+/frontend: Next.js source, components, hooks.
+/extension: Manifest V3 source (background, content_script, overlay).
+/appDataDir/brain/<id>: Contains task.md, walkthrough.md, and implementation_plan.md.
+📝 Roadmap / Next Steps
+Safety Refinement: Implement the backend logic for safety_response (currently a TODO in main.py).
+Context Window Management: The run_agent_loop currently appends screenshots to the conversation; implement a pruning strategy for very long tasks.
+Accessibility Overlay: Enhance the overlay.js in the extension to high-contrast highlight elements the AI is "looking at" based on vision tokens (if supported).
+🤝 Collaboration Protocol
+When taking over:
 
-## Architecture
-
-- **Frontend**: Next.js 15, TypeScript, Vanilla CSS, WebSockets
-- **Backend**: Python 3.11, FastAPI, Playwright (headless Chromium), Google GenAI SDK
-
-## Quick Start (Local Development)
-
-### 1. Backend Setup
-
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-
-# Set your API key in .env
-cp .env.example .env
-
-# Run FastAPI server
-uvicorn app.main:app --port 8080
-```
-
-### 2. Frontend Setup
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000` in your browser.
-
-## Google Cloud Deployment
-
-This project is built to deploy on Google Cloud Run. 
-
-1. **Enable APIs**: Vertex AI, Cloud Storage, Firestore, Pub/Sub, Cloud Run
-2. **Build Backend Image**: `docker build -t gcr.io/udaa-489513/backend backend/`
-3. **Deploy Backend**: `gcloud run deploy udaa-backend --image gcr.io/udaa-489513/backend --memory 2Gi --cpu 2`
-4. **Deploy Frontend**: Deploy the `frontend/` directory to Vercel or Cloud Run.
+Run git pull origin main.
+Start backend: cd backend && source venv/bin/activate && uvicorn app.main:app --port 8080 --reload.
+Start frontend: cd frontend && npm run dev.
+Check task.md for the current checklist status.
