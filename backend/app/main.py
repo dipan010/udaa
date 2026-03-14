@@ -11,13 +11,14 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from google import genai
+from google.genai import types
 
 from app.config import get_settings
 from app.websocket import manager as ws_manager
-from app.browser_adapters.playwright_adapter import PlaywrightAdapter
 from app.browser_adapters.base_adapter import BrowserAdapter
 from app.computer_use import run_agent_loop
 from app.live_stream import run_live_stream
@@ -108,6 +109,32 @@ async def create_task(request: TaskRequest):
     )
 
 
+@app.post("/voice-task")
+async def transcribe_voice_task(audio: UploadFile = File(...)):
+    """Transcribe voice audio to text using Gemini."""
+    try:
+        audio_bytes = await audio.read()
+        client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_bytes(data=audio_bytes, mime_type=audio.content_type or "audio/webm"),
+                        types.Part.from_text("Transcribe the user's voice command accurately. Return ONLY the transcribed text. Do not include markdown or quotes.")
+                    ]
+                )
+            ]
+        )
+        return {"text": response.text.strip()}
+    except Exception as e:
+        logger.error(f"Voice transcription error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 @app.get("/tasks/{session_id}")
 async def get_task(session_id: str):
     """Get task status."""
@@ -148,22 +175,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 start_url = message["data"].get("start_url", "")
                 execution_mode = message["data"].get("execution_mode", "remote")
 
+                patience_mode = message["data"].get("patience_mode", False)
+                grandparents_mode = message["data"].get("grandparents_mode", False)
+
                 logger.info(
-                    f"Task start: session={session_id}, mode={execution_mode}, task='{task}', url='{start_url}'"
+                    f"Task start: session={session_id}, mode={execution_mode}, task='{task}', url='{start_url}', patience={patience_mode}, gp_mode={grandparents_mode}"
                 )
 
                 # Create session in Firestore
                 await create_session(session_id, task, start_url)
 
-                # Initialize selected browser adapter
+                # Initialize live browser adapter
                 try:
-                    if execution_mode == "live":
-                        from app.browser_adapters.live_browser_adapter import LiveBrowserAdapter
-                        browser = LiveBrowserAdapter(session_id)
-                        await browser.launch(start_url=start_url)
-                    else:
-                        browser = PlaywrightAdapter()
-                        await browser.launch()
+                    from app.browser_adapters.live_browser_adapter import LiveBrowserAdapter
+                    browser = LiveBrowserAdapter(session_id)
+                    await browser.launch(start_url=start_url)
                 except Exception as launch_err:
                     logger.error(f"Browser launch failed: {launch_err}")
                     await ws_manager.send_error(
@@ -186,10 +212,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 # Start agent loop & live stream in parallel
                 agent_task = asyncio.create_task(
-                    run_agent_loop(session_id, task, start_url, browser)
+                    run_agent_loop(session_id, task, start_url, browser, patience_mode)
                 )
                 live_task = asyncio.create_task(
-                    run_live_stream(session_id, task, browser)
+                    run_live_stream(session_id, task, browser, grandparents_mode)
                 )
 
                 active_sessions[session_id]["agent_task"] = agent_task
@@ -225,12 +251,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
             elif msg_type == "safety_response":
                 # User approved or rejected a safety confirmation
-                request_id = message["data"].get("request_id")
                 approved = message["data"].get("approved", False)
+                user_input = message["data"].get("user_input", None)
                 logger.info(
-                    f"Safety response: request={request_id}, approved={approved}"
+                    f"Safety response: approved={approved}, input={'provided' if user_input else 'none'}"
                 )
-                # TODO: Signal the agent loop with user decision
+                from app.pause_gate import get_or_create as get_gate
+                gate = get_gate(session_id)
+                gate.approved = approved
+                gate.user_input = user_input
+                gate.event.set()
 
             elif msg_type == "cancel_task":
                 logger.info(f"Task cancelled: session={session_id}")

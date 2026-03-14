@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { AgentStatus, AgentAction, SafetyConfirmRequest } from '../lib/types';
+import { AgentStatus, AgentAction, SafetyConfirmRequest, PausePromptData } from '../lib/types';
 
 interface UseWebSocketReturn {
     isConnected: boolean;
@@ -10,9 +10,10 @@ interface UseWebSocketReturn {
     actions: { step: number; data: AgentAction }[];
     narration: string;
     safetyRequest: SafetyConfirmRequest | null;
+    pausePrompt: PausePromptData | null;
     taskSummary: string | null;
     error: string | null;
-    startTask: (task: string, start_url: string, executionMode?: "remote" | "live") => void;
+    startTask: (task: string, start_url: string, patienceMode?: boolean, grandparentsMode?: boolean) => void;
     sendSafetyResponse: (request_id: string, approved: boolean) => void;
     cancelTask: () => void;
 }
@@ -26,6 +27,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
     const [actions, setActions] = useState<{ step: number; data: AgentAction }[]>([]);
     const [narration, setNarration] = useState('');
     const [safetyRequest, setSafetyRequest] = useState<SafetyConfirmRequest | null>(null);
+    const [pausePrompt, setPausePrompt] = useState<PausePromptData | null>(null);
     const [taskSummary, setTaskSummary] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +48,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
             setActions([]);
             setNarration('');
             setSafetyRequest(null);
+            setPausePrompt(null);
             setTaskSummary(null);
             setError(null);
         }
@@ -92,6 +95,12 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
                             request_id: data.request_id,
                             action: data.action,
                         });
+                        break;
+
+                    case 'pause_prompt':
+                        setStatus('confirming');
+                        setStatusDetail('Waiting for your input');
+                        setPausePrompt(data);
                         break;
 
                     case 'task_complete':
@@ -158,7 +167,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
 
     // --- Actions ---
 
-    const startTask = useCallback((task: string, start_url: string, executionMode: "remote" | "live" = "remote") => {
+    const startTask = useCallback((task: string, start_url: string, patienceMode: boolean = false, grandparentsMode: boolean = false) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             setError('Not connected to backend');
             return;
@@ -170,12 +179,13 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
         setActions([]);
         setNarration('');
         setSafetyRequest(null);
+        setPausePrompt(null);
         setTaskSummary(null);
         setError(null);
 
         wsRef.current.send(JSON.stringify({
             type: 'task_start',
-            data: { task, start_url, execution_mode: executionMode }
+            data: { task, start_url, execution_mode: "live", patience_mode: patienceMode, grandparents_mode: grandparentsMode }
         }));
     }, []);
 
@@ -188,6 +198,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
         }));
 
         setSafetyRequest(null);
+        setPausePrompt(null);
         setStatus('thinking');
         setStatusDetail('Resuming execution...');
     }, []);
@@ -213,6 +224,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
         actions,
         narration,
         safetyRequest,
+        pausePrompt,
         taskSummary,
         error,
         startTask,

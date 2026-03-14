@@ -18,6 +18,12 @@ export interface SafetyConfirmRequest {
     action: AgentAction;
 }
 
+export interface PausePromptData {
+    reason: string;
+    prompt: string;
+    needs_input: boolean;
+}
+
 export interface WSMessage {
     type: string;
     data: any;

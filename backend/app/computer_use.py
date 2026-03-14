@@ -19,12 +19,76 @@ from app.pubsub import publish_action
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+async def _signal_extension_complete(session_id: str, manager):
+    """Send completed status directly to the extension overlay."""
+    await manager.broadcast_to_extension(session_id, {
+        "type": "UDAA_STATUS",
+        "payload": { "status": "completed", "message": "Task done." }
+    })
+
+from app.pause_gate import get_or_create as get_gate
+
+SENSITIVE_DOMAINS = [
+    "accounts.google.com", "login.", "signin.", "auth.",
+    "paypal.com", "pay.", "checkout.", "payment.",
+    "facebook.com/login", "twitter.com/login", "netflix.com/login",
+]
+
+def _is_login_wall(url: str) -> bool:
+    if not url: return False
+    return any(d in url for d in SENSITIVE_DOMAINS)
+
+def _action_to_plain_english(action_name: str, args: dict) -> str:
+    if action_name in ["click_at", "click", "left_click"]:
+        return "Click a button or link"
+    elif action_name in ["type_text_at", "type"]:
+        text = args.get("text", "...")
+        if len(text) > 15:
+            return "Type a message"
+        return f"Type '{text}'"
+    elif action_name == "navigate":
+        return f"Open website: {args.get('url', '...')}"
+    elif action_name in ["scroll", "scroll_document", "scroll_at"]:
+        dir = args.get("direction", "down")
+        return f"Scroll {dir} the page"
+    elif action_name == "key_combination":
+        keys = args.get("keys", [])
+        return f"Press shortcut: {'+'.join(keys) if isinstance(keys, list) else keys}"
+    elif action_name == "hover_at":
+        return "Point at an element"
+    return "Prepare to take action"
+
+async def _pause_and_wait(
+    session_id: str,
+    reason: str,
+    prompt_text: str,
+    ws_manager,
+    needs_input: bool = False,
+) -> tuple[bool, str | None]:
+    """Pause the agent, surface a prompt to the user, await their response."""
+    gate = get_gate(session_id)
+    gate.event.clear()
+    gate.reason = reason
+
+    # Tell frontend to show the pause prompt
+    await ws_manager.send_pause_prompt(session_id, {
+        "reason": reason,
+        "prompt": prompt_text,
+        "needs_input": needs_input,
+    })
+
+    # Block here — no timeout, agent waits as long as the human needs
+    await gate.event.wait()
+    return gate.approved, gate.user_input
+
 
 async def run_agent_loop(
     session_id: str,
     task: str,
     start_url: str,
     browser: BrowserAdapter,
+    patience_mode: bool = False,
+    grandparents_mode: bool = False,
 ):
     """Execute the Computer Use agent loop.
 
@@ -37,6 +101,9 @@ async def run_agent_loop(
     7. Repeat until task complete or max turns reached
     """
     client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+    
+    post_action_sleep = 2.0 if patience_mode else 0.5
+    post_nav_sleep = 4.0 if patience_mode else 1.0
 
     # Configure Computer Use tool
     config = types.GenerateContentConfig(
@@ -66,11 +133,11 @@ async def run_agent_loop(
 
     # Navigate to start URL
     if start_url:
-        await ws_manager.send_status(session_id, "navigating", f"Opening {start_url}")
+        await ws_manager.send_status(session_id, "navigating", f"Opening {start_url}", grandparents_mode)
         page = browser.page
         if page:
             await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(1)
+            await asyncio.sleep(post_nav_sleep)
 
     # Build initial content with task
     contents: list[types.Content] = [
@@ -86,7 +153,7 @@ async def run_agent_loop(
     for turn in range(settings.MAX_AGENT_TURNS):
         logger.info(f"Agent turn {turn + 1}/{settings.MAX_AGENT_TURNS}")
         await ws_manager.send_status(
-            session_id, "thinking", f"Step {turn + 1}: Analyzing screen..."
+            session_id, "thinking", f"Step {turn + 1}: Analyzing screen...", grandparents_mode
         )
 
         # Capture screenshot
@@ -157,6 +224,7 @@ async def run_agent_loop(
                 summary = combined_text.split("TASK COMPLETE:")[-1].strip() if "TASK COMPLETE:" in combined_text else combined_text
                 await ws_manager.send_task_complete(session_id, summary)
                 await update_session_state(session_id, "completed", summary)
+                await _signal_extension_complete(session_id, ws_manager)
                 logger.info(f"Task completed: {summary[:100]}")
                 return
 
@@ -173,12 +241,14 @@ async def run_agent_loop(
                 if any(w in combined_lower for w in completion_words):
                     await ws_manager.send_task_complete(session_id, " ".join(text_parts))
                     await update_session_state(session_id, "completed", " ".join(text_parts))
+                    await _signal_extension_complete(session_id, ws_manager)
                     return
             
             nudge_count += 1
             if nudge_count >= 2:
                 await ws_manager.send_task_complete(session_id, "Task appears complete.")
                 await update_session_state(session_id, "completed", "No-action stop")
+                await _signal_extension_complete(session_id, ws_manager)
                 return
             
             contents.append(
@@ -202,6 +272,7 @@ async def run_agent_loop(
                 session_id, "Task complete — repeated action guard triggered."
             )
             await update_session_state(session_id, "completed", "Dedup stop")
+            await _signal_extension_complete(session_id, ws_manager)
             return
          
         last_action_signature = current_sig
@@ -211,9 +282,50 @@ async def run_agent_loop(
             action_name = fc.name
             action_args = dict(fc.args) if fc.args else {}
 
-            logger.info(f"Action: {action_name}({action_args})")
+            if action_name == 'require_confirmation':
+                prompt = action_args.get('message', 'The agent wants to perform a sensitive action.')
+                approved, _ = await _pause_and_wait(
+                    session_id,
+                    reason='confirmation',
+                    prompt_text=prompt,
+                    ws_manager=ws_manager,
+                    needs_input=False,
+                )
+                if not approved:
+                    await ws_manager.send_status(session_id, 'cancelled', 'User declined.', grandparents_mode)
+                    return
+                continue  # re-enter loop, Gemini will proceed
+            
+            # Auto-detect login walls from current URL
+            current_url = await browser.get_current_url()
+            if _is_login_wall(current_url):
+                approved, typed_text = await _pause_and_wait(
+                    session_id,
+                    reason='login_wall',
+                    prompt_text='The page is asking you to log in. Please sign in, then click Continue.',
+                    ws_manager=ws_manager,
+                    needs_input=False,
+                )
+                if not approved:
+                    await ws_manager.send_status(session_id, 'cancelled', 'User cancelled at login wall.', grandparents_mode)
+                    return
+                # After user signals ready, take a fresh screenshot and continue
+                await asyncio.sleep(1)
+                continue
+
+            plain_action = _action_to_plain_english(action_name, action_args)
+            logger.info(f"Action: {action_name}({action_args}) -> {plain_action}")
+            
+            # Use Plain English if Grandparents Mode is on
+            status_msg = plain_action if grandparents_mode else f"Executing: {action_name}"
+
+            # 1. PREVIEW: show what we are ABOUT to do (Section 6.2)
+            await ws_manager.send_action_preview(session_id, plain_action)
+            await asyncio.sleep(0.8) # 800ms preview delay
+
+            # 2. STATUS: show we are doing it now
             await ws_manager.send_status(
-                session_id, "executing", f"Executing: {action_name}"
+                session_id, "executing", status_msg, grandparents_mode
             )
 
             # Publish to Pub/Sub (for audit trail)
@@ -232,7 +344,7 @@ async def run_agent_loop(
             )
 
             # Small delay between actions
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(post_action_sleep)
 
         # Add action results as user message for next turn
         action_summary_lines = []
@@ -253,13 +365,14 @@ async def run_agent_loop(
         ))
 
         # Brief wait for page to settle after actions
-        await asyncio.sleep(1)
+        await asyncio.sleep(post_nav_sleep)
 
     # Max turns reached
-    await ws_manager.send_status(session_id, "timeout", "Maximum steps reached")
+    await ws_manager.send_status(session_id, "timeout", "Maximum steps reached", grandparents_mode)
     await ws_manager.send_task_complete(
         session_id,
         f"Agent reached the maximum of {settings.MAX_AGENT_TURNS} steps. "
         "The task may be partially complete."
     )
     await update_session_state(session_id, "timeout", "Max turns reached")
+    await _signal_extension_complete(session_id, ws_manager)

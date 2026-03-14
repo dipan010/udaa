@@ -30,7 +30,7 @@ function connectWebSocket(sessionId) {
             // Forward status to the active tab to render the UI banner
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                 if (tabs.length === 0) return;
-                
+
                 // Ensure scripts are injected before sending status
                 chrome.scripting.executeScript({
                     target: { tabId: tabs[0].id },
@@ -38,6 +38,19 @@ function connectWebSocket(sessionId) {
                 }, () => {
                     chrome.tabs.sendMessage(tabs[0].id, {
                         type: "UDAA_STATUS",
+                        payload: message
+                    });
+                });
+            });
+        } else if (message.type === "action_preview") {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                if (tabs.length === 0) return;
+                chrome.scripting.executeScript({
+                    target: { tabId: tabs[0].id },
+                    files: ["overlay.js", "content_script.js"]
+                }, () => {
+                    chrome.tabs.sendMessage(tabs[0].id, {
+                        type: "ACTION_PREVIEW",
                         payload: message
                     });
                 });
@@ -65,7 +78,7 @@ function executeInActiveTab(command) {
                 if (chrome.runtime.lastError) {
                     console.warn("UDAA Extension: Could not inject scripts:", chrome.runtime.lastError.message);
                 }
-                
+
                 // Send message to the content script in the active tab
                 chrome.tabs.sendMessage(activeTab.id, {
                     type: "EXECUTE_ACTION",
@@ -74,7 +87,7 @@ function executeInActiveTab(command) {
                     if (chrome.runtime.lastError) {
                         console.warn("UDAA Extension: Could not send message to tab:", chrome.runtime.lastError.message);
                     }
-                    
+
                     // Report result back to backend
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
@@ -134,12 +147,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // This catches cases where content_script.js is blocked from running (e.g., chrome:// or restricted pages)
 let activeTabPolling = setInterval(() => {
     if (ws && ws.readyState === WebSocket.OPEN) return; // Already connected
-    
+
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (!tabs || tabs.length === 0) return;
         const url = tabs[0].url;
         if (!url) return;
-        
+
         try {
             const urlObj = new URL(url);
             const sessionId = urlObj.searchParams.get('udaa_session_id');

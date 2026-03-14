@@ -52,81 +52,8 @@ async function executeAction(action, args) {
         }
         return window.udaa.performType(args.text);
 
-    } else if (action === "navigate" || action === "open_web_browser") {
-        if (args.url && args.url !== "about:blank") {
-            window.location.href = args.url;
-            await new Promise(r => setTimeout(r, 200));
-        }
-        return true;
-
-    } else if (action === "hover_at" || action === "hover") {
-        const { x, y } = _scaleCoords(args);
-        return window.udaa.performHover(x, y);
-
-    } else if (action === "key_combination") {
-        return window.udaa.performKeyCombination(args.keys || []);
-
-    } else if (action === "scroll_document" || action === "scroll") {
-        return window.udaa.performScroll(args.direction || "down", args.amount || 3);
-
-    } else if (action === "scroll_at") {
-        const { x, y } = _scaleCoords(args);
-        window.udaa.performHover(x, y);
-        return window.udaa.performScroll(args.direction || "down", args.amount || 3);
-    }
-    return false;
-}
-
-function _setInputValue(element, value) {
-    if (element.isContentEditable) {
-        document.execCommand("selectAll", false, null);
-        document.execCommand("insertText", false, value);
-    } else {
-        const proto = element.tagName === "TEXTAREA"
-            ? window.HTMLTextAreaElement.prototype
-            : window.HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        if (setter) setter.call(element, value);
-        else element.value = value;
-    }
-}
-
-function _fireEnter(element) {
-    ["keydown", "keypress", "keyup"].forEach(evType => {
-        element.dispatchEvent(new KeyboardEvent(evType, {
-            key: "Enter", code: "Enter", keyCode: 13, which: 13,
-            bubbles: true, cancelable: true
-        }));
-    });
-    if (element.form && document.contains(element)) {
-        element.form.requestSubmit?.() ?? element.form.submit();
-    }
-}
-
-function _scaleCoords(args) {
-    let x = args.x ?? 0, y = args.y ?? 0;
-    if (args.coordinates?.length >= 2) {
-        x = Math.round((args.coordinates[0] / 1000) * window.innerWidth);
-        y = Math.round((args.coordinates[1] / 1000) * window.innerHeight);
-    } else if (typeof x === "number" && typeof y === "number") {
-        x = Math.round((x / 1000) * window.innerWidth);
-        y = Math.round((y / 1000) * window.innerHeight);
-    }
-    return { x, y };
-}
-
-async function executeAction(action, args) {
-    if (action === "click_at" || action === "click" || action === "left_click") {
-        const { x, y } = _scaleCoords(args);
-        return window.udaa.performClick(x, y);
-
-    } else if (action === "type_text_at" || action === "type") {
-        if (args.x !== undefined || args.coordinates) {
-            const { x, y } = _scaleCoords(args);
-            window.udaa.performClick(x, y);
-            await new Promise(r => setTimeout(r, 80)); // let focus settle
-        }
-        return window.udaa.performType(args.text);
+    } else if (action === "get_current_url") {
+        return { url: window.location.href };
 
     } else if (action === "navigate" || action === "open_web_browser") {
         if (args.url && args.url !== "about:blank") {
@@ -152,6 +79,8 @@ async function executeAction(action, args) {
     }
     return false;
 }
+
+
 
 window.udaa = {
     getDOMSnapshot: () => {
@@ -355,7 +284,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.type === "UDAA_STATUS") {
         if (request.payload) {
             const status = request.payload.status;
-            const msg = `UDAA: ${request.payload.message}`;
+            const isGP = request.payload.grandparents_mode;
+            let msg = request.payload.message ? `UDAA: ${request.payload.message}` : status.toUpperCase();
+
+            if (isGP) {
+                const GP_COPY = {
+                    "thinking": "Thinking about what to do next...",
+                    "executing": "Working on it...",
+                    "navigating": "Going to a new page...",
+                    "confirming": "Double checking with you...",
+                    "idle": "Ready to help",
+                    "error": "Oops, something went wrong",
+                    "completed": "Finished helping with this task.",
+                    "cancelled": "Stopped task."
+                };
+                if (GP_COPY[status]) {
+                    msg = GP_COPY[status];
+                } else if (request.payload.message && status !== "completed") {
+                    // Fallback to the natural language summary sent by the backend
+                    msg = request.payload.message;
+                }
+            }
+
             const type = (status === "completed" || status === "error" || status === "timeout" || status === "cancelled")
                 ? (status === "completed" ? "completed" : "error")
                 : "active";
@@ -398,15 +348,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 } else if (type === 'completed') {
                     banner.style.border = "2px solid #2ecc71";
                     banner.style.color = "#2ecc71";
-                    setTimeout(() => { if (banner) banner.remove(); }, 5000);
+                    banner.textContent = msg;
+                    // Wait 3s so user can read it, THEN remove
+                    setTimeout(() => { if (banner && banner.parentNode) banner.remove(); }, 3000);
+                    // Also clear the pulsing animation if any
+                    banner.style.animation = 'none';
                 } else {
                     banner.style.border = "2px solid #e74c3c";
                     banner.style.color = "#e74c3c";
-                    setTimeout(() => { if (banner) banner.remove(); }, 5000);
+                    setTimeout(() => { if (banner && banner.parentNode) banner.remove(); }, 3000);
                 }
                 if (status === "cancelled") {
-                    if (banner) banner.remove();
+                    if (banner && banner.parentNode) banner.remove();
                 }
+            }
+        }
+    } else if (request.type === "ACTION_PREVIEW") {
+        if (request.payload && request.payload.text) {
+            const msg = `About to: ${request.payload.text}`;
+            if (window.udaaOverlay && typeof window.udaaOverlay.showStatus === 'function') {
+                window.udaaOverlay.showStatus(msg, 'active');
             }
         }
     }
@@ -439,3 +400,29 @@ if (!window.__udaaConnectInitialized) {
         }
     }, 500);
 }
+
+// Security Badge Injection
+setTimeout(() => {
+    const sensitiveDomains = ["accounts.google.com", ".bank", "paypal.com", "stripe.com", "login", "signin", "auth", "checkout", "pay."];
+    const url = window.location.href.toLowerCase();
+
+    if (sensitiveDomains.some(d => url.includes(d)) && !document.getElementById("udaa-security-badge")) {
+        const badge = document.createElement("div");
+        badge.id = "udaa-security-badge";
+        badge.innerHTML = "🔒 <b>Secure Page</b> &nbsp;|&nbsp; UDAA respects your privacy here.";
+        badge.style.position = "fixed";
+        badge.style.top = "20px";
+        badge.style.left = "50%";
+        badge.style.transform = "translateX(-50%)";
+        badge.style.backgroundColor = "rgba(46, 204, 113, 0.95)";
+        badge.style.color = "white";
+        badge.style.padding = "8px 20px";
+        badge.style.borderRadius = "20px";
+        badge.style.fontSize = "13px";
+        badge.style.fontFamily = "sans-serif";
+        badge.style.zIndex = "2147483647"; // Max z-index
+        badge.style.boxShadow = "0 4px 12px rgba(0,0,0,0.2)";
+        badge.style.pointerEvents = "none";
+        document.body.appendChild(badge);
+    }
+}, 1000);

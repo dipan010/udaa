@@ -13,6 +13,11 @@ class BrowserAdapter(ABC):
         pass
 
     @abstractmethod
+    async def get_current_url(self) -> str:
+        """Get the current URL of the active tab."""
+        pass
+
+    @abstractmethod
     async def capture_screenshot(self) -> bytes:
         """Capture a PNG screenshot of the current page."""
         pass

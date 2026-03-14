@@ -24,6 +24,11 @@ class LiveBrowserAdapter(BrowserAdapter):
     def page(self):
         return self._page
 
+    async def get_current_url(self) -> str:
+        res = await self.execute_action("get_current_url", {})
+        return res.get("url", "")
+
+
     async def launch(self, start_url: str = ""):
         """Launch a new tab in the user's existing default OS browser."""
         import urllib.parse

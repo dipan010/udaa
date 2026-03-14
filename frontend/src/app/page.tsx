@@ -3,12 +3,15 @@
 import { useState, useEffect, useRef } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { SafetyConfirmModal } from "@/components/SafetyConfirmModal";
+import { PausePromptModal } from "@/components/PausePromptModal";
+import { VoiceInput } from "@/components/VoiceInput";
 
 export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [taskInput, setTaskInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
-  const [executionMode, setExecutionMode] = useState<"remote" | "live">("remote");
+  const [patienceMode, setPatienceMode] = useState(false);
+  const [grandparentsMode, setGrandparentsMode] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -20,6 +23,7 @@ export default function Home() {
     actions,
     narration,
     safetyRequest,
+    pausePrompt,
     error,
     startTask,
     sendSafetyResponse,
@@ -35,7 +39,7 @@ export default function Home() {
 
   const handleStartTask = () => {
     if (!taskInput.trim()) return;
-    startTask(taskInput.trim(), urlInput.trim(), executionMode);
+    startTask(taskInput.trim(), urlInput.trim(), patienceMode, grandparentsMode);
   };
 
   const isAgentActive = ["started", "navigating", "thinking", "executing", "confirming"].includes(status);
@@ -191,23 +195,33 @@ export default function Home() {
               </div>
 
               <div className="flex flex-col shrink-0 mt-2">
-                <label className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Execution Mode</label>
-                <div className="flex gap-2 bg-slate-100 dark:bg-slate-900/50 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800">
-                  <button
-                    onClick={() => setExecutionMode("remote")}
-                    disabled={isAgentActive}
-                    className={`flex-1 py-3 text-sm font-bold rounded-lg transition-all ${executionMode === "remote" ? "bg-white dark:bg-slate-800 shadow-sm text-primary border border-slate-200 dark:border-slate-700" : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"}`}
-                  >
-                    Remote Browser
-                  </button>
-                  <button
-                    onClick={() => setExecutionMode("live")}
-                    disabled={isAgentActive}
-                    className={`flex-1 py-3 text-sm font-bold rounded-lg transition-all flex items-center justify-center gap-2 ${executionMode === "live" ? "bg-white dark:bg-slate-800 shadow-sm text-primary border border-slate-200 dark:border-slate-700" : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"}`}
-                  >
-                    <span className="material-symbols-outlined text-[16px]">extension</span>
-                    Live Browser
-                  </button>
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="patience-mode"
+                      checked={patienceMode}
+                      onChange={(e) => setPatienceMode(e.target.checked)}
+                      disabled={isAgentActive}
+                      className="w-4 h-4 text-primary bg-slate-100 border-slate-300 rounded focus:ring-primary dark:focus:ring-primary dark:ring-offset-slate-800 focus:ring-2 dark:bg-slate-700 dark:border-slate-600 cursor-pointer"
+                    />
+                    <label htmlFor="patience-mode" className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer">
+                      Patience Mode (Slower execution)
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="grandparents-mode"
+                      checked={grandparentsMode}
+                      onChange={(e) => setGrandparentsMode(e.target.checked)}
+                      disabled={isAgentActive}
+                      className="w-4 h-4 text-primary bg-slate-100 border-slate-300 rounded focus:ring-primary dark:focus:ring-primary dark:ring-offset-slate-800 focus:ring-2 dark:bg-slate-700 dark:border-slate-600 cursor-pointer"
+                    />
+                    <label htmlFor="grandparents-mode" className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer">
+                      Grandparents Mode (Simple narration & UI)
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -222,10 +236,10 @@ export default function Home() {
                     onChange={(e) => setTaskInput(e.target.value)}
                     disabled={isAgentActive}
                   />
-                  <div className="absolute bottom-4 right-4 text-slate-400 flex items-center gap-1.5 pointer-events-none group-focus-within:text-primary transition-colors">
-                    <span className="material-symbols-outlined text-[18px]">mic</span>
-                    <span className="text-[11px] sm:text-xs font-bold uppercase tracking-wider">Voice Active</span>
-                  </div>
+                  <VoiceInput
+                    onTranscript={(text: string) => setTaskInput(prev => prev ? prev + " " + text : text)}
+                    disabled={isAgentActive}
+                  />
                 </div>
               </div>
 
@@ -267,67 +281,68 @@ export default function Home() {
 
             </div>
           </div>
-        </div>
 
-        {/* Stats/History Strip */}
-        <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow">
-            <div className="size-14 shrink-0 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 flex items-center justify-center border border-blue-100 dark:border-blue-900/30">
-              <span className="material-symbols-outlined text-3xl">history</span>
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1">Last Task</p>
-              <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">
-                {taskInput ? `"${taskInput}"` : "None"}
-              </p>
-              <p className="text-xs text-green-600 dark:text-green-500 font-bold tracking-wide mt-1">{status === 'completed' ? 'Completed successfully' : isAgentActive ? 'In Progress...' : 'Waiting'}</p>
-            </div>
-          </div>
-
-          <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group">
-            <div className="absolute right-0 top-0 bottom-0 w-16 bg-gradient-to-l from-white dark:from-slate-900 to-transparent z-10 pointer-events-none"></div>
-            <div className="size-14 shrink-0 rounded-xl bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 flex items-center justify-center border border-purple-100 dark:border-purple-900/30">
-              <span className="material-symbols-outlined text-3xl">bolt</span>
-            </div>
-            <div className="min-w-0 flex-1 relative h-[60px] cursor-ns-resize">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1 sticky top-0 bg-white dark:bg-slate-900 z-20">Confidence Score & Logs</p>
-
-              <div
-                className="overflow-y-auto scroll-smooth absolute inset-x-0 bottom-0 h-[44px] pb-1 scroll-area opacity-0 group-hover:opacity-100 transition-opacity"
-                ref={scrollRef}
-              >
-                {actions.length > 0 ? (
-                  <div className="flex flex-col gap-1.5 justify-end min-h-full">
-                    {actions.map((a, i) => (
-                      <p key={i} className="text-[11px] text-slate-500 font-mono truncate leading-tight border-l-2 border-primary/30 pl-2">
-                        {a.data.action}
-                      </p>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-slate-400 italic">No telemetry logs recorded yet...</p>
-                )}
-              </div>
-
-              <div className="absolute inset-x-0 bottom-1 opacity-100 group-hover:opacity-0 transition-opacity flex flex-col justify-end h-[44px]">
-                <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">98.4% Accuracy</p>
-                <p className="text-xs text-slate-400 tracking-wide mt-0.5">Based on last 50 tasks</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow">
-            <div className="size-14 shrink-0 rounded-xl bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 flex items-center justify-center border border-orange-100 dark:border-orange-900/30">
-              <span className="material-symbols-outlined text-3xl">visibility</span>
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1">Active Overlays</p>
-              <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">3 Accessibility Layers</p>
-              <p className="text-xs text-slate-400 tracking-wide mt-1 truncate">Color correction: Tritanopia</p>
-            </div>
-          </div>
         </div>
       </main>
+
+      {/* Stats/History Strip */}
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow">
+          <div className="size-14 shrink-0 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 flex items-center justify-center border border-blue-100 dark:border-blue-900/30">
+            <span className="material-symbols-outlined text-3xl">history</span>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1">Last Task</p>
+            <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">
+              {taskInput ? `"${taskInput}"` : "None"}
+            </p>
+            <p className="text-xs text-green-600 dark:text-green-500 font-bold tracking-wide mt-1">{status === 'completed' ? 'Completed successfully' : isAgentActive ? 'In Progress...' : 'Waiting'}</p>
+          </div>
+        </div>
+
+        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden group">
+          <div className="absolute right-0 top-0 bottom-0 w-16 bg-gradient-to-l from-white dark:from-slate-900 to-transparent z-10 pointer-events-none"></div>
+          <div className="size-14 shrink-0 rounded-xl bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 flex items-center justify-center border border-purple-100 dark:border-purple-900/30">
+            <span className="material-symbols-outlined text-3xl">bolt</span>
+          </div>
+          <div className="min-w-0 flex-1 relative h-[60px] cursor-ns-resize">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1 sticky top-0 bg-white dark:bg-slate-900 z-20">Confidence Score & Logs</p>
+
+            <div
+              className="overflow-y-auto scroll-smooth absolute inset-x-0 bottom-0 h-[44px] pb-1 scroll-area opacity-0 group-hover:opacity-100 transition-opacity"
+              ref={scrollRef}
+            >
+              {actions.length > 0 ? (
+                <div className="flex flex-col gap-1.5 justify-end min-h-full">
+                  {actions.map((a, i) => (
+                    <p key={i} className="text-[11px] text-slate-500 font-mono truncate leading-tight border-l-2 border-primary/30 pl-2">
+                      {a.data.action}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400 italic">No telemetry logs recorded yet...</p>
+              )}
+            </div>
+
+            <div className="absolute inset-x-0 bottom-1 opacity-100 group-hover:opacity-0 transition-opacity flex flex-col justify-end h-[44px]">
+              <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">98.4% Accuracy</p>
+              <p className="text-xs text-slate-400 tracking-wide mt-0.5">Based on last 50 tasks</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex items-center gap-5 shadow-sm hover:shadow-md transition-shadow">
+          <div className="size-14 shrink-0 rounded-xl bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 flex items-center justify-center border border-orange-100 dark:border-orange-900/30">
+            <span className="material-symbols-outlined text-3xl">visibility</span>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.15em] mb-1">Active Overlays</p>
+            <p className="text-base sm:text-lg font-bold text-slate-800 dark:text-white truncate">3 Accessibility Layers</p>
+            <p className="text-xs text-slate-400 tracking-wide mt-1 truncate">Color correction: Tritanopia</p>
+          </div>
+        </div>
+      </div>
 
       {/* Contextual Help Footer */}
       <footer className="mt-auto px-6 py-5 border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950/60 backdrop-blur-md">
@@ -353,6 +368,14 @@ export default function Home() {
       {safetyRequest && (
         <SafetyConfirmModal
           request={safetyRequest}
+          onRespond={sendSafetyResponse}
+        />
+      )}
+
+      {/* Pause Prompt Modal */}
+      {pausePrompt && (
+        <PausePromptModal
+          prompt={pausePrompt}
           onRespond={sendSafetyResponse}
         />
       )}

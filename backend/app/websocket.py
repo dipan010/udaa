@@ -53,6 +53,16 @@ class ConnectionManager:
                 logger.error(f"Failed to send to extension {session_id}: {e}")
                 self.disconnect_extension(session_id)
 
+    async def broadcast_to_extension(self, session_id: str, message: dict):
+        """Broadcast a message as JSON text to the Chrome Extension."""
+        ws = self.extension_connections.get(session_id)
+        if ws:
+            try:
+                await ws.send_text(json.dumps(message))
+            except Exception as e:
+                logger.error(f"Failed to broadcast to extension {session_id}: {e}")
+                self.disconnect_extension(session_id)
+
     async def send_message(self, session_id: str, message: dict[str, Any]):
         """Send a JSON message to a specific session."""
         ws = self.active_connections.get(session_id)
@@ -90,7 +100,18 @@ class ConnectionManager:
             "data": {"text": text}
         })
 
-    async def send_status(self, session_id: str, status: str, detail: str = ""):
+    async def send_action_preview(self, session_id: str, preview_text: str):
+        """Send a plain English preview of the next action before it executes."""
+        await self.send_message(session_id, {
+            "type": "action_preview",
+            "data": {"text": preview_text}
+        })
+        await self.send_to_extension(session_id, {
+            "type": "action_preview",
+            "text": preview_text
+        })
+
+    async def send_status(self, session_id: str, status: str, detail: str = "", grandparents_mode: bool = False):
         """Send agent status update."""
         # Send to main frontend UI
         await self.send_message(session_id, {
@@ -101,7 +122,8 @@ class ConnectionManager:
         await self.send_to_extension(session_id, {
             "type": "status",
             "status": status,
-            "message": detail
+            "message": detail,
+            "grandparents_mode": grandparents_mode
         })
 
     async def send_safety_confirm(self, session_id: str, action: dict, request_id: str):
@@ -125,7 +147,10 @@ class ConnectionManager:
         await self.send_to_extension(session_id, {
             "type": "status",
             "status": "completed",
-            "message": summary
+            "message": summary,
+            # We don't have the flag in this method, but the extension will fallback safely or we can omit it since "completed" doesn't strictly need translation if done right.
+            # Actually, let's just send false to satisfy the typed nature.
+            "grandparents_mode": False
         })
 
     async def send_error(self, session_id: str, error: str):
@@ -135,6 +160,19 @@ class ConnectionManager:
             "data": {"message": error}
         })
 
+
+    async def send_pause_prompt(self, session_id: str, data: dict):
+        """Send a prompt that pauses the loop and waits for user input."""
+        await self.send_message(session_id, {
+            "type": "pause_prompt",
+            "data": data,
+        })
+        # Optionally tell extension we are paused
+        await self.send_to_extension(session_id, {
+            "type": "status",
+            "status": "active",
+            "message": "Waiting for your input..."
+        })
 
 # Singleton connection manager
 manager = ConnectionManager()
