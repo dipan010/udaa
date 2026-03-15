@@ -13,7 +13,7 @@ function connectWebSocket(sessionId) {
     if (ws) ws.close();
     currentSessionId = sessionId;
 
-    ws = new WebSocket(`ws://localhost:8080/ws/live_ext/${sessionId}`);
+    ws = new WebSocket(`ws://localhost:8000/ws/live_ext/${sessionId}`);
 
     ws.onopen = () => {
         console.log("UDAA Extension: Connected to backend for session", sessionId);

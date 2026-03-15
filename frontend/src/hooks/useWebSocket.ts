@@ -53,7 +53,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
             setError(null);
         }
 
-        const wsUrl = `ws://localhost:8080/ws/${sessionId}`;
+        const wsUrl = `ws://localhost:8000/ws/${sessionId}`;
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {

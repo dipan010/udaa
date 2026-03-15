@@ -2,6 +2,8 @@
 // Responsible for executing actions on the DOM and extracting data
 
 window.udaaLastClickedElement = null;
+window._udaaLastClickX = null;
+window._udaaLastClickY = null;
 
 function _setInputValue(element, value) {
     if (element.isContentEditable) {
@@ -41,6 +43,258 @@ function _scaleCoords(args) {
     return { x, y };
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// UNIVERSAL DOM RESOLVER — 4-Layer Input Resolution System
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Layer 1 Utility: _isTypeable ─────────────────────────────────────────────
+// Returns true if the element can accept text input.
+function _isTypeable(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'TEXTAREA') return true;
+    if (tag === 'INPUT') {
+        const t = (el.getAttribute('type') || 'text').toLowerCase();
+        return ['text', 'search', 'email', 'password', 'tel', 'url', 'number', 'date', 'time', 'datetime-local', 'month', 'week'].includes(t);
+    }
+    if (el.isContentEditable) return true;
+    // Shadow DOM: check if el hosts a shadow with an input inside
+    if (el.shadowRoot) {
+        const inner = el.shadowRoot.querySelector('input, textarea, [contenteditable]');
+        if (inner) return true;
+    }
+    return false;
+}
+
+// ── Layer 1 Utility: _isVisible ──────────────────────────────────────────────
+// Checks if an element is actually visible to the user.
+function _isVisible(el) {
+    if (!el || !document.contains(el)) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
+    if (rect.right < 0 || rect.left > window.innerWidth) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    if (parseFloat(style.opacity) < 0.05) return false;
+    return true;
+}
+
+// ── Layer 1 Utility: _hasElevatedAncestor ────────────────────────────────────
+// Detects whether an element lives inside a modal, overlay, or floating layer.
+function _hasElevatedAncestor(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+        const style = window.getComputedStyle(node);
+        if (style.position === 'fixed' || style.position === 'sticky') return true;
+        if (parseInt(style.zIndex, 10) > 100) return true;
+        const role = node.getAttribute('role') || '';
+        if (['dialog', 'alertdialog', 'tooltip', 'listbox', 'combobox'].includes(role)) return true;
+        const ariaModal = node.getAttribute('aria-modal');
+        if (ariaModal === 'true') return true;
+        node = node.parentElement;
+    }
+    return false;
+}
+
+// ── Layer 3: _findBestInputCandidate ─────────────────────────────────────────
+// Priority-ordered selector chain covering every known framework pattern.
+const INPUT_QUERY_PRIORITY = [
+    // ARIA roles (framework-agnostic, highest confidence)
+    '[role="dialog"] input:not([type="hidden"]):not([disabled])',
+    '[role="dialog"] textarea:not([disabled])',
+    '[role="alertdialog"] input:not([type="hidden"]):not([disabled])',
+    '[aria-modal="true"] input:not([type="hidden"]):not([disabled])',
+    '[aria-modal="true"] textarea:not([disabled])',
+    // Angular CDK overlay container
+    '.cdk-overlay-container input:not([type="hidden"]):not([disabled])',
+    '.cdk-overlay-pane input:not([type="hidden"]):not([disabled])',
+    // Generic overlay/modal class patterns
+    '[class*="modal"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Modal"] input:not([type="hidden"]):not([disabled])',
+    '[class*="dialog"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Dialog"] input:not([type="hidden"]):not([disabled])',
+    '[class*="overlay"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Overlay"] input:not([type="hidden"]):not([disabled])',
+    '[class*="popup"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Popup"] input:not([type="hidden"]):not([disabled])',
+    '[class*="drawer"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Drawer"] input:not([type="hidden"]):not([disabled])',
+    // Search/autocomplete patterns (React/Vue typeahead components)
+    '[class*="search"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Search"] input:not([type="hidden"]):not([disabled])',
+    '[class*="autocomplete"] input:not([type="hidden"]):not([disabled])',
+    '[class*="Autocomplete"] input:not([type="hidden"]):not([disabled])',
+    '[class*="combobox"] input:not([type="hidden"]):not([disabled])',
+    '[class*="typeahead"] input:not([type="hidden"]):not([disabled])',
+    // Floating / portal patterns (React Portals, Vue Teleport)
+    'body > div[id] input:not([type="hidden"]):not([disabled])',
+    'body > div[class] input:not([type="hidden"]):not([disabled])',
+    // Fallback: any visible typeable element on the page
+    'input:not([type="hidden"]):not([disabled])',
+    'textarea:not([disabled])',
+    '[contenteditable="true"]',
+];
+
+function _findBestInputCandidate() {
+    for (const selector of INPUT_QUERY_PRIORITY) {
+        try {
+            const candidates = [...document.querySelectorAll(selector)];
+            const visible = candidates.filter(el => _isVisible(el) && _isTypeable(el));
+            if (visible.length === 0) continue;
+            // Among visible matches: prefer elevated (overlay) elements
+            const elevated = visible.filter(_hasElevatedAncestor);
+            if (elevated.length > 0) return elevated[0];
+            return visible[0];
+        } catch (e) {
+            continue;
+        }
+    }
+    // Shadow DOM fallback (uncomment only for Salesforce/Ionic/web-component sites):
+    // const shadowInputs = _queryAllDeep('input:not([type="hidden"]):not([disabled])')
+    //     .filter(el => _isVisible(el));
+    // if (shadowInputs.length > 0) return shadowInputs[0];
+    return null;
+}
+
+// ── Layer 2: _watchForNewInput (MutationObserver) ────────────────────────────
+// Watches for DOM changes that produce a new typeable input.
+let _activeObserver = null;
+
+function _watchForNewInput(timeoutMs = 700) {
+    return new Promise((resolve) => {
+        if (_activeObserver) {
+            _activeObserver.disconnect();
+            _activeObserver = null;
+        }
+
+        // Check immediately — DOM may already have the new input
+        const immediate = _findBestInputCandidate();
+        if (immediate && immediate !== document.body && immediate !== document.documentElement) {
+            resolve(immediate);
+            return;
+        }
+
+        const deadline = Date.now() + timeoutMs;
+        let resolved = false;
+
+        const tryResolve = () => {
+            if (resolved) return;
+            const found = _findBestInputCandidate();
+            if (found && found !== document.body) {
+                resolved = true;
+                _activeObserver.disconnect();
+                _activeObserver = null;
+                resolve(found);
+                return true;
+            }
+            return false;
+        };
+
+        _activeObserver = new MutationObserver(() => {
+            if (tryResolve()) return;
+            if (Date.now() > deadline) {
+                if (!resolved) {
+                    resolved = true;
+                    _activeObserver.disconnect();
+                    _activeObserver = null;
+                    resolve(null);
+                }
+            }
+        });
+
+        _activeObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'display'],
+        });
+
+        // Hard timeout fallback
+        setTimeout(() => {
+            if (!resolved) {
+                resolved = true;
+                if (_activeObserver) {
+                    _activeObserver.disconnect();
+                    _activeObserver = null;
+                }
+                resolve(null);
+            }
+        }, timeoutMs + 50);
+    });
+}
+
+// ── Layer 0 + 1 + 2 + 3 Combined: _resolveTypeTarget ────────────────────────
+// 4-layer priority resolution for finding the best input target.
+async function _resolveTypeTarget(clickX, clickY, timeoutMs = 800) {
+    // Layer 0: activeElement — if it's already typeable, use it immediately
+    const active = document.activeElement;
+    if (active && _isTypeable(active) && _isVisible(active)) {
+        console.log('UDAA Resolver: Layer 0 — activeElement is typeable');
+        return active;
+    }
+
+    // Layer 1: Last clicked element — if still in DOM and typeable
+    if (window.udaaLastClickedElement
+        && document.contains(window.udaaLastClickedElement)
+        && _isTypeable(window.udaaLastClickedElement)
+        && _isVisible(window.udaaLastClickedElement)) {
+        console.log('UDAA Resolver: Layer 1 — using last clicked element');
+        window.udaaLastClickedElement.focus();
+        return window.udaaLastClickedElement;
+    }
+
+    // Layer 2: MutationObserver — wait for React/Vue/Angular to render new input
+    console.log('UDAA Resolver: Layer 2 — waiting for MutationObserver...');
+    const observed = await _watchForNewInput(timeoutMs);
+    if (observed) {
+        console.log('UDAA Resolver: Layer 2 — observer found input:', observed.tagName, observed.getAttribute('placeholder')?.slice(0, 30) || '');
+        observed.focus();
+        return observed;
+    }
+
+    // Layer 3: Brute-force scan — query DOM with priority selectors
+    console.log('UDAA Resolver: Layer 3 — brute-force DOM scan...');
+    const candidate = _findBestInputCandidate();
+    if (candidate) {
+        console.log('UDAA Resolver: Layer 3 — found candidate:', candidate.tagName, candidate.getAttribute('placeholder')?.slice(0, 30) || '');
+        candidate.focus();
+        return candidate;
+    }
+
+    // Layer 4 (last resort): elementFromPoint at the last click location
+    if (clickX != null && clickY != null) {
+        const el = document.elementFromPoint(clickX, clickY);
+        if (el && _isTypeable(el)) {
+            console.log('UDAA Resolver: Layer 4 — elementFromPoint fallback');
+            el.focus();
+            return el;
+        }
+    }
+
+    console.warn('UDAA Resolver: All 4 layers failed — no typeable element found');
+    return null;
+}
+
+// ── Shadow DOM piercing utility (disabled by default — expensive) ────────────
+// Uncomment only when targeting Salesforce Lightning, Ionic, or Lit-based sites.
+// function _queryAllDeep(selector, root = document) {
+//     const results = [];
+//     const walker = (node) => {
+//         try { results.push(...node.querySelectorAll(selector)); } catch(e) {}
+//         node.querySelectorAll('*').forEach(el => {
+//             if (el.shadowRoot) walker(el.shadowRoot);
+//         });
+//     };
+//     walker(root);
+//     return results;
+// }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ACTION DISPATCHER
+// ══════════════════════════════════════════════════════════════════════════════
+
 async function executeAction(action, args) {
     if (action === "click_at" || action === "click" || action === "left_click") {
         const { x, y } = _scaleCoords(args);
@@ -50,9 +304,11 @@ async function executeAction(action, args) {
         if (args.x !== undefined || args.coordinates) {
             const { x, y } = _scaleCoords(args);
             window.udaa.performClick(x, y);
-            await new Promise(r => setTimeout(r, 80)); // let focus settle
+            // Give the pre-arm observer a 100ms head start
+            // before performType calls _resolveTypeTarget
+            await new Promise(r => setTimeout(r, 100));
         }
-        return window.udaa.performType(args.text);
+        return await window.udaa.performType(args.text);  // MUST be awaited
 
     } else if (action === "get_current_url") {
         return { url: window.location.href };
@@ -90,6 +346,10 @@ window.udaa = {
     },
 
     performClick: (x, y) => {
+        // Save click coordinates for the DOM Resolver
+        window._udaaLastClickX = x;
+        window._udaaLastClickY = y;
+
         // elementFromPoint evaluates viewport-relative coords, whereas x,y are layout relative
         // We must subtract scroll distances
         const viewportX = x - window.scrollX;
@@ -129,30 +389,39 @@ window.udaa = {
             // Save as fallback for performType
             window.udaaLastClickedElement = element;
 
+            // Pre-arm MutationObserver: watch for new inputs that React/Vue may spawn
+            _watchForNewInput(800).then(found => {
+                if (found) console.log('UDAA: Pre-click observer caught input:', found.tagName);
+            });
+
             console.log(`UDAA: Clicked at ${x}, ${y}`);
             return true;
         }
         return false;
     },
 
-    performType: (text) => {
-        let element = document.activeElement;
+    performType: async (text) => {
+        // ── Universal DOM Resolver: find the best input target ────────
+        const element = await _resolveTypeTarget(
+            window._udaaLastClickX,
+            window._udaaLastClickY,
+            800
+        );
 
-        // If the active element is not an input, try the last clicked element (fallback for sites that steal focus)
-        const isInput = (el) => el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
-
-        if (!isInput(element)) {
-            if (isInput(window.udaaLastClickedElement) && document.contains(window.udaaLastClickedElement)) {
-                console.log("UDAA: Active element is not an input, falling back to last clicked element for type action.");
-                element = window.udaaLastClickedElement;
-                element.focus(); // Try to refocus it
-            } else {
-                console.warn("UDAA: No focused input for type action, and no valid fallback.");
-                return false;
-            }
+        if (!element) {
+            console.warn('UDAA: performType — all resolver layers failed, no typeable element found.');
+            return false;
         }
 
-        // Dedup repeated strings (keep existing logic)
+        // Brief settle for the element to be ready
+        await new Promise(r => setTimeout(r, 40));
+
+        console.log('UDAA: Typing into', element.tagName,
+            element.getAttribute('placeholder')?.slice(0, 30) || '',
+            element.className?.slice(0, 40) || '');
+
+        // ── Existing type logic (unchanged) ──────────────────────────
+        // Dedup repeated strings
         if (text.length > 3) {
             const h = Math.floor(text.length / 2);
             if (text.slice(0, h) === text.slice(h)) text = text.slice(0, h);
