@@ -261,17 +261,42 @@ async def run_agent_loop(
             )
         )
 
-        # Call Gemini Computer Use model
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=settings.COMPUTER_USE_MODEL,
-                contents=contents,
-                config=config,
-            )
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            await ws_manager.send_error(session_id, f"AI model error: {str(e)}")
+        # Call Gemini Computer Use model (retry on 503/429 — temporary overload)
+        response = None
+        last_error = None
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=settings.COMPUTER_USE_MODEL,
+                    contents=contents,
+                    config=config,
+                )
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                err_str = str(e).upper()
+                is_retryable = "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                if is_retryable and attempt < max_retries - 1:
+                    delay = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                    logger.warning(f"Gemini API overload ({e}). Retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(delay)
+                else:
+                    break
+        if last_error is not None:
+            err_str = str(last_error).upper()
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                msg = "The AI service is busy. Please try again in a minute."
+            elif "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                msg = "Too many requests. Please wait a moment and try again."
+            else:
+                msg = f"AI model error: {last_error}"
+            logger.error(f"Gemini API error: {last_error}")
+            await ws_manager.send_error(session_id, msg)
+            break
+        if response is None:
             break
 
         if not response or not response.candidates:
@@ -281,6 +306,10 @@ async def run_agent_loop(
 
         candidate = response.candidates[0]
         content = candidate.content
+        if content is None or not getattr(content, "parts", None):
+            logger.warning("Model returned candidate with no content or no parts (e.g. safety filter)")
+            await ws_manager.send_error(session_id, "Model returned no actionable response (safety or empty). Try rephrasing.")
+            break
 
         # Add model response to conversation history
         contents.append(content)

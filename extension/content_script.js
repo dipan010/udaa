@@ -1,7 +1,6 @@
-// MUST BE LINE 1 — prevents re-injection crash on SPA route changes
-if (window.__udaaContentScriptLoaded) {
-    throw new Error('UDAA: content script already loaded — skipping re-injection');
-}
+(function() {
+// Prevents re-injection: on SPA navigations or duplicate inject, skip silently (no throw).
+if (window.__udaaContentScriptLoaded) return;
 window.__udaaContentScriptLoaded = true;
 
 window.udaaLastClickedElement = null;
@@ -886,3 +885,5 @@ setTimeout(() => {
         document.body.appendChild(badge);
     }
 }, 1000);
+
+})();
