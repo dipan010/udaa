@@ -1,6 +1,8 @@
 // content_script.js
 // Responsible for executing actions on the DOM and extracting data
 
+window.udaaLastClickedElement = null;
+
 function _setInputValue(element, value) {
     if (element.isContentEditable) {
         document.execCommand("selectAll", false, null);
@@ -124,6 +126,9 @@ window.udaa = {
                 element.focus();
             }
 
+            // Save as fallback for performType
+            window.udaaLastClickedElement = element;
+
             console.log(`UDAA: Clicked at ${x}, ${y}`);
             return true;
         }
@@ -131,14 +136,20 @@ window.udaa = {
     },
 
     performType: (text) => {
-        const element = document.activeElement;
-        if (!element || (
-            element.tagName !== "INPUT" &&
-            element.tagName !== "TEXTAREA" &&
-            !element.isContentEditable
-        )) {
-            console.warn("UDAA: No focused input for type action");
-            return false;
+        let element = document.activeElement;
+
+        // If the active element is not an input, try the last clicked element (fallback for sites that steal focus)
+        const isInput = (el) => el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+
+        if (!isInput(element)) {
+            if (isInput(window.udaaLastClickedElement) && document.contains(window.udaaLastClickedElement)) {
+                console.log("UDAA: Active element is not an input, falling back to last clicked element for type action.");
+                element = window.udaaLastClickedElement;
+                element.focus(); // Try to refocus it
+            } else {
+                console.warn("UDAA: No focused input for type action, and no valid fallback.");
+                return false;
+            }
         }
 
         // Dedup repeated strings (keep existing logic)
