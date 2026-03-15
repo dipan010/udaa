@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useSpeech } from "@/hooks/useSpeech";
 import { SafetyConfirmModal } from "@/components/SafetyConfirmModal";
 import { PausePromptModal } from "@/components/PausePromptModal";
 import { VoiceInput } from "@/components/VoiceInput";
@@ -12,7 +13,11 @@ export default function Home() {
   const [urlInput, setUrlInput] = useState("");
   const [patienceMode, setPatienceMode] = useState(false);
   const [grandparentsMode, setGrandparentsMode] = useState(false);
+  const [narrationEnabled, setNarrationEnabled] = useState(true);
+  const [displayText, setDisplayText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const narrationQueue = useRef<string[]>([]);
+  const isDisplaying = useRef(false);
 
   const {
     isConnected,
@@ -39,10 +44,46 @@ export default function Home() {
 
   const handleStartTask = () => {
     if (!taskInput.trim()) return;
-    startTask(taskInput.trim(), urlInput.trim(), patienceMode, grandparentsMode);
+    startTask(taskInput.trim(), urlInput.trim(), patienceMode, grandparentsMode, narrationEnabled);
   };
 
   const isAgentActive = ["started", "navigating", "thinking", "executing", "confirming"].includes(status);
+
+  // Text-to-Speech for narration
+  const { speak, stop } = useSpeech(narrationEnabled);
+
+  // Display narration with a queue to avoid flickering
+  const displayNextNarration = useCallback(() => {
+    if (narrationQueue.current.length === 0) {
+      isDisplaying.current = false;
+      return;
+    }
+    isDisplaying.current = true;
+    const next = narrationQueue.current.shift()!;
+    setDisplayText(next);
+    if (narrationEnabled) {
+      speak(next);
+    }
+
+    // Hold each message for at least 3 seconds
+    setTimeout(displayNextNarration, 3000);
+  }, [narrationEnabled, speak]);
+
+  useEffect(() => {
+    if (narration) {
+      narrationQueue.current.push(narration);
+      if (!isDisplaying.current) {
+        displayNextNarration();
+      }
+    }
+  }, [narration, displayNextNarration]);
+
+  // Stop speech when task ends
+  useEffect(() => {
+    if (['completed', 'error', 'cancelled', 'idle'].includes(status)) {
+      stop();
+    }
+  }, [status, stop]);
 
   // Auto scroll actions
   useEffect(() => {
@@ -59,7 +100,7 @@ export default function Home() {
           <div className="flex items-center justify-center size-10 rounded-xl bg-primary text-white shadow-sm shadow-primary/30">
             <span className="material-symbols-outlined text-3xl">accessibility</span>
           </div>
-          <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">Accessibility Agent</h1>
+          <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">HandOff: Universal Accessibility Agent</h1>
         </div>
         <div className="flex items-center gap-4">
           <button aria-label="Settings" className="flex items-center justify-center size-10 md:size-12 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
@@ -222,6 +263,19 @@ export default function Home() {
                       Grandparents Mode (Simple narration & UI)
                     </label>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="narration-tts"
+                      checked={narrationEnabled}
+                      onChange={(e) => setNarrationEnabled(e.target.checked)}
+                      disabled={isAgentActive}
+                      className="w-4 h-4 text-primary bg-slate-100 border-slate-300 rounded focus:ring-primary dark:focus:ring-primary dark:ring-offset-slate-800 focus:ring-2 dark:bg-slate-700 dark:border-slate-600 cursor-pointer"
+                    />
+                    <label htmlFor="narration-tts" className="text-[10px] sm:text-xs font-bold text-slate-500 uppercase tracking-widest cursor-pointer">
+                      🔊 Speak Narration (Text-to-Speech)
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -266,7 +320,7 @@ export default function Home() {
                     <span className="material-symbols-outlined text-[18px] text-indigo-600 dark:text-indigo-400 mt-0.5 animate-pulse shrink-0">psychiatry</span>
                     <div>
                       <p className="text-sm font-bold text-indigo-700 dark:text-indigo-400">{statusDetail}</p>
-                      {narration && <p className="text-xs text-indigo-600/80 dark:text-indigo-300/80 mt-1 italic font-medium leading-relaxed tracking-wide">"{narration}"</p>}
+                      {displayText && <p className="text-xs text-indigo-600/80 dark:text-indigo-300/80 mt-1 italic font-medium leading-relaxed tracking-wide">"{displayText}"</p>}
                     </div>
                   </div>
                 ) : (

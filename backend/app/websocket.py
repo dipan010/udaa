@@ -100,6 +100,16 @@ class ConnectionManager:
             "data": {"text": text}
         })
 
+    async def send_audio_narration(self, session_id: str, audio_b64: str):
+        """Send live audio narration chunk (base64) from the Live API."""
+        await self.send_message(session_id, {
+            "type": "audio_narration",
+            "data": {"audio": audio_b64,
+                     "encoding": "pcm",
+                     "sample_rate": 24000,
+                     }
+        })
+
     async def send_action_preview(self, session_id: str, preview_text: str):
         """Send a plain English preview of the next action before it executes."""
         await self.send_message(session_id, {
@@ -118,12 +128,15 @@ class ConnectionManager:
             "type": "status_update",
             "data": {"status": status, "detail": detail}
         })
-        # Send to Live Browser Extension for overlay rendering
-        await self.send_to_extension(session_id, {
-            "type": "status",
-            "status": status,
-            "message": detail,
-            "grandparents_mode": grandparents_mode
+        # Extension — FIXED: was "type": "status", now "type": "UDAA_STATUS"
+        # content_script.js listens for "UDAA_STATUS" — "status" was silently ignored
+        await self.broadcast_to_extension(session_id, {
+            "type": "UDAA_STATUS",
+            "payload": {
+                "status": status,
+                "message": detail,
+                "grandparents_mode": grandparents_mode
+            }
         })
 
     async def send_safety_confirm(self, session_id: str, action: dict, request_id: str):
@@ -138,19 +151,19 @@ class ConnectionManager:
 
     async def send_task_complete(self, session_id: str, summary: str):
         """Notify the frontend that the task is complete."""
-        # Send to main frontend UI
+        # 1. Dashboard
         await self.send_message(session_id, {
             "type": "task_complete",
             "data": {"summary": summary}
         })
-        # Send to Live Browser Extension for overlay rendering
-        await self.send_to_extension(session_id, {
-            "type": "status",
-            "status": "completed",
-            "message": summary,
-            # We don't have the flag in this method, but the extension will fallback safely or we can omit it since "completed" doesn't strictly need translation if done right.
-            # Actually, let's just send false to satisfy the typed nature.
-            "grandparents_mode": False
+        # 2. Extension overlay — use UDAA_STATUS which content_script.js listens for
+        await self.broadcast_to_extension(session_id, {
+            "type": "UDAA_STATUS",
+            "payload": {
+                "status": "completed",
+                "message": f"All done! {summary}" if summary else "Task complete.",
+                "grandparents_mode": False
+            }
         })
 
     async def send_error(self, session_id: str, error: str):
@@ -167,11 +180,14 @@ class ConnectionManager:
             "type": "pause_prompt",
             "data": data,
         })
-        # Optionally tell extension we are paused
-        await self.send_to_extension(session_id, {
-            "type": "status",
-            "status": "active",
-            "message": "Waiting for your input..."
+        # Extension — FIXED: was "type": "status", now "type": "UDAA_STATUS"
+        await self.broadcast_to_extension(session_id, {
+            "type": "UDAA_STATUS",
+            "payload": {
+                "status": "active",
+                "message": "Waiting for your input...",
+                "grandparents_mode": False
+            }
         })
 
 # Singleton connection manager

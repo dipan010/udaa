@@ -1,18 +1,19 @@
 import { useState } from 'react';
-import { Play, Link2, MessageSquare } from 'lucide-react';
+import { Play, Link2, MessageSquare, Volume2, VolumeX } from 'lucide-react';
 
 interface TaskInputProps {
-    onStart: (task: string, startUrl: string) => void;
+    onStart: (task: string, startUrl: string, narrationEnabled: boolean) => void;
     disabled: boolean;
 }
 
 export function TaskInput({ onStart, disabled }: TaskInputProps) {
     const [task, setTask] = useState('');
     const [url, setUrl] = useState('');
+    const [narrationEnabled, setNarrationEnabled] = useState(true);
 
     const handleStart = () => {
         if (!task.trim()) return;
-        onStart(task.trim(), url.trim());
+        onStart(task.trim(), url.trim(), narrationEnabled);
     };
 
     const handleExampleClick = (exampleTask: string, exampleUrl: string) => {
@@ -56,14 +57,35 @@ export function TaskInput({ onStart, disabled }: TaskInputProps) {
                 />
             </div>
 
-            <button
-                className="btn-primary"
-                onClick={handleStart}
-                disabled={disabled || !task.trim()}
-            >
-                <Play fill="currentColor" size={20} />
-                Execute Mission
-            </button>
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+                <button
+                    className="btn-primary"
+                    onClick={handleStart}
+                    disabled={disabled || !task.trim()}
+                    style={{ flex: 1 }}
+                >
+                    <Play fill="currentColor" size={20} />
+                    Execute Mission
+                </button>
+
+                <button
+                    type="button"
+                    className={`btn-secondary ${narrationEnabled ? 'active' : ''}`}
+                    onClick={() => setNarrationEnabled(!narrationEnabled)}
+                    title={narrationEnabled ? "Narration: ON" : "Narration: OFF"}
+                    style={{
+                        flex: '0 0 48px',
+                        padding: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderColor: narrationEnabled ? 'var(--accent-cyan)' : 'var(--border-color)',
+                        color: narrationEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)'
+                    }}
+                >
+                    {narrationEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+                </button>
+            </div>
 
             <div style={{ marginTop: '0.5rem' }}>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>Quick Starts:</p>

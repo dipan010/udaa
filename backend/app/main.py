@@ -177,9 +177,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 patience_mode = message["data"].get("patience_mode", False)
                 grandparents_mode = message["data"].get("grandparents_mode", False)
+                narration_enabled = message["data"].get("narration_enabled", True)
 
                 logger.info(
-                    f"Task start: session={session_id}, mode={execution_mode}, task='{task}', url='{start_url}', patience={patience_mode}, gp_mode={grandparents_mode}"
+                    f"Task start: session={session_id}, mode={execution_mode}, task='{task}', url='{start_url}', patience={patience_mode}, gp_mode={grandparents_mode}, narration={narration_enabled}"
                 )
 
                 # Create session in Firestore
@@ -211,15 +212,25 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 )
 
                 # Start agent loop & live stream in parallel
+                last_action_time_ref = [0.0]
+                completion_text_ref = [None]
+                live_session_ref = [None]  # holds the live session so agent loop can push into it
+
                 agent_task = asyncio.create_task(
-                    run_agent_loop(session_id, task, start_url, browser, patience_mode)
+                    run_agent_loop(session_id, task, start_url, browser, patience_mode, grandparents_mode, last_action_time_ref, completion_text_ref, live_session_ref)
                 )
-                live_task = asyncio.create_task(
-                    run_live_stream(session_id, task, browser, grandparents_mode)
-                )
+                
+                # Only start narration stream if enabled
+                live_task = None
+                if narration_enabled:
+                    live_task = asyncio.create_task(
+                        run_live_stream(session_id, task, browser, grandparents_mode, last_action_time_ref, completion_text_ref, live_session_ref)
+                    )
 
                 active_sessions[session_id]["agent_task"] = agent_task
                 active_sessions[session_id]["live_task"] = live_task
+                active_sessions[session_id]["completion_text_ref"] = completion_text_ref
+                active_sessions[session_id]["live_session_ref"] = live_session_ref
 
                 # Monitor agent completion
                 async def on_agent_done(t):

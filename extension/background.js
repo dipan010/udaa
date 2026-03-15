@@ -5,6 +5,9 @@ let ws = null;
 let streamingInterval = null;
 let currentSessionId = null;
 
+// Track tabs where content_script.js is already running to avoid re-injection errors
+const injectedTabs = new Set();
+
 chrome.runtime.onInstalled.addListener(() => {
     console.log("UDAA Live Controller installed.");
 });
@@ -32,11 +35,18 @@ function connectWebSocket(sessionId) {
                 if (tabs.length === 0) return;
 
                 // Ensure scripts are injected before sending status
+                const tabId = tabs[0].id;
+                if (injectedTabs.has(tabId)) {
+                    chrome.tabs.sendMessage(tabId, { type: "UDAA_STATUS", payload: message });
+                    return;
+                }
+
                 chrome.scripting.executeScript({
-                    target: { tabId: tabs[0].id },
+                    target: { tabId: tabId },
                     files: ["overlay.js", "content_script.js"]
                 }, () => {
-                    chrome.tabs.sendMessage(tabs[0].id, {
+                    injectedTabs.add(tabId);
+                    chrome.tabs.sendMessage(tabId, {
                         type: "UDAA_STATUS",
                         payload: message
                     });
@@ -45,11 +55,18 @@ function connectWebSocket(sessionId) {
         } else if (message.type === "action_preview") {
             chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
                 if (tabs.length === 0) return;
+                const tabId = tabs[0].id;
+                if (injectedTabs.has(tabId)) {
+                    chrome.tabs.sendMessage(tabId, { type: "ACTION_PREVIEW", payload: message });
+                    return;
+                }
+
                 chrome.scripting.executeScript({
-                    target: { tabId: tabs[0].id },
+                    target: { tabId: tabId },
                     files: ["overlay.js", "content_script.js"]
                 }, () => {
-                    chrome.tabs.sendMessage(tabs[0].id, {
+                    injectedTabs.add(tabId);
+                    chrome.tabs.sendMessage(tabId, {
                         type: "ACTION_PREVIEW",
                         payload: message
                     });
@@ -71,34 +88,43 @@ function executeInActiveTab(command) {
 
         // Inject overlay if not already present
         try {
+            if (injectedTabs.has(activeTab.id)) {
+                _sendMessageToActionScript(activeTab.id, command);
+                return;
+            }
+
             chrome.scripting.executeScript({
                 target: { tabId: activeTab.id },
                 files: ["overlay.js", "content_script.js"]
             }, () => {
                 if (chrome.runtime.lastError) {
                     console.warn("UDAA Extension: Could not inject scripts:", chrome.runtime.lastError.message);
+                } else {
+                    injectedTabs.add(activeTab.id);
                 }
-
-                // Send message to the content script in the active tab
-                chrome.tabs.sendMessage(activeTab.id, {
-                    type: "EXECUTE_ACTION",
-                    payload: { action: command.action, args: command }
-                }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.warn("UDAA Extension: Could not send message to tab:", chrome.runtime.lastError.message);
-                    }
-
-                    // Report result back to backend
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: "action_result",
-                            result: response || { action: command.action, success: false, detail: "No response from tab" }
-                        }));
-                    }
-                });
+                _sendMessageToActionScript(activeTab.id, command);
             });
         } catch (e) {
             console.error("UDAA Extension: Failed to execute tab action", e);
+        }
+    });
+}
+
+function _sendMessageToActionScript(tabId, command) {
+    chrome.tabs.sendMessage(tabId, {
+        type: "EXECUTE_ACTION",
+        payload: { action: command.action, args: command }
+    }, (response) => {
+        if (chrome.runtime.lastError) {
+            console.warn("UDAA Extension: Could not send message to tab:", chrome.runtime.lastError.message);
+        }
+
+        // Report result back to backend
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: "action_result",
+                result: response || { action: command.action, success: false, detail: "No response from tab" }
+            }));
         }
     });
 }
@@ -181,4 +207,20 @@ chrome.action.onClicked.addListener((tab) => {
             connectWebSocket(results[0].result);
         }
     });
+});
+
+// ── Tab Lifecycle Management ────────────────────────────────────────────────
+// Clear injection flag on hard reloads or manual URL navigations.
+// Without this, the agent would block itself from working after a page refresh.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    // Detect hard reload or new URL navigation
+    if (changeInfo.status === 'loading' && changeInfo.url) {
+        console.log(`UDAA: Tab ${tabId} reloaded/navigated. Resetting injection state.`);
+        injectedTabs.delete(tabId);
+    }
+});
+
+// Crucial: forget tabs when they are closed to prevent memory leaks
+chrome.tabs.onRemoved.addListener((tabId) => {
+    injectedTabs.delete(tabId);
 });

@@ -2,8 +2,8 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Universal Digital Accessibility Agent",
-  description: "AI-powered agent that autonomously navigates digital interfaces.",
+  title: "HandOff: Universal Digital Accessibility Agent",
+  description: "A multimodal AI agent that autonomously navigates UI interfaces.",
 };
 
 export default function RootLayout({

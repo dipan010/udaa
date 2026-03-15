@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import uuid
+import time
 from typing import Any
 
 from google import genai
@@ -27,6 +28,64 @@ async def _signal_extension_complete(session_id: str, manager):
     })
 
 from app.pause_gate import get_or_create as get_gate
+
+_last_narration_inject_time = 0.0
+
+async def _narrate_action(
+    action_name: str,
+    action_args: dict,
+    last_action_time_ref: list | None,
+    live_session_ref: list | None,
+    grandparents_mode: bool = False,
+):
+    global _last_narration_inject_time
+
+    # Always update action timestamp for cooldown tracking
+    if last_action_time_ref is not None:
+        last_action_time_ref[0] = time.time()
+
+    # Don't narrate if Live session isn't open
+    if live_session_ref is None or live_session_ref[0] is None:
+        return
+
+    # Rate limit — never inject narration faster than every 3 seconds
+    # This prevents audio blur when the agent fires multiple actions quickly
+    now = time.time()
+    if now - _last_narration_inject_time < 3.0:
+        return
+    _last_narration_inject_time = now
+
+    # Build plain English description — different phrasing per mode
+    if action_name in ("type_text_at", "type"):
+        text_typed = action_args.get("text", "")
+        plain = f"typing: {text_typed}"
+    elif action_name in ("navigate", "open_web_browser"):
+        url = action_args.get("url", "a new page")
+        plain = f"opening {url}"
+    elif action_name in ("scroll_document", "scroll"):
+        direction = action_args.get("direction", "down")
+        plain = f"scrolling {direction}"
+    elif action_name == "key_combination":
+        keys = action_args.get("keys", "")
+        plain = f"pressing {keys}"
+    elif action_name in ("click_at", "left_click", "click"):
+        plain = "clicking on something on the screen"
+    else:
+        plain = action_name
+
+    # Normal mode: factual log-style. Grandparents mode: warm first-person.
+    # The Live session system prompt shapes Gemini's spoken RESPONSE to this.
+    if grandparents_mode:
+        msg = f"I'm now {plain}."
+    else:
+        msg = f"Action: {plain}"
+
+    try:
+        await live_session_ref[0].send_client_content(
+            turns=types.Content(parts=[types.Part(text=msg)])
+        )
+    except Exception as e:
+        logger.debug(f"Live action narration skipped: {e}")
 
 SENSITIVE_DOMAINS = [
     "accounts.google.com", "login.", "signin.", "auth.",
@@ -89,6 +148,9 @@ async def run_agent_loop(
     browser: BrowserAdapter,
     patience_mode: bool = False,
     grandparents_mode: bool = False,
+    last_action_time_ref: list | None = None,
+    completion_text_ref: list | None = None,
+    live_session_ref: list | None = None,  # holds the live session so agent loop can push into it
 ):
     """Execute the Computer Use agent loop.
 
@@ -118,16 +180,20 @@ async def run_agent_loop(
             "You are a browser automation agent completing tasks step by step. "
             "Issue ONE action per response. Check action history before acting.\n\n"
             "COMPLETION RULES — output 'TASK COMPLETE: <summary>' when:\n"
-            "- Search task: results page is visible with the searched term\n"
-            "- Navigation task: the target URL/page has fully loaded\n"
-            "- Form task: confirmation or success message is visible\n"
-            "- Play/open task: the media or content is actively playing\n\n"
+            "- The user's actual goal has been accomplished (e.g., booking confirmed, form submitted, information found ON the destination website).\n"
+            "- A destination site explicitly shows 'no results', 'not available', or 'no trains/flights found' — report that outcome.\n"
+            "- A confirmation or success message is visible after a form submission.\n"
+            "- DO NOT declare complete just because Google search results loaded. You must click through to the actual website and complete the task there.\n\n"
             "ACTION RULES:\n"
             "1. One action per response — never queue multiple actions.\n"
             "2. Action history is shown before each screenshot. Do NOT repeat any action already listed there.\n"
-            "3. After pressing Enter or clicking Search, the next action must be TASK COMPLETE if results load.\n"
-            "4. Use 'navigate' to go to a URL directly — never type URLs into search bars.\n"
-            "5. For sensitive actions (passwords, payments) use 'require_confirmation'."
+            "3. Use 'navigate' to go to a URL directly — never type URLs into search bars.\n"
+            "4. For sensitive actions (passwords, payments) use 'require_confirmation'.\n"
+            "5. Follow the user's exact wording for names, stations, cities, and dates. Never substitute with a different station or city.\n"
+            "6. If a page is still loading or shows a spinner, wait (do nothing) and let the next screenshot confirm the state before acting.\n"
+            "7. If a site shows no availability or 'no results', report TASK COMPLETE with what you found — do not keep searching endlessly.\n"
+            "8. When a dropdown, autocomplete list, or city picker is open, use 'select_option' with the exact visible text (e.g., 'Delhi') to pick the item. This is much more reliable than clicking coordinates.\n"
+            "9. Only use 'click_at' for dropdowns if 'select_option' is not available or the items have no text labels."
         ),
     )
 
@@ -139,11 +205,16 @@ async def run_agent_loop(
             await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(post_nav_sleep)
 
-    # Build initial content with task
+    # Building optimization: tell the agent the browser is already open
     contents: list[types.Content] = [
         types.Content(
             role="user",
-            parts=[types.Part(text=f"Task: {task}")],
+            parts=[types.Part(text=(
+                f"Task: {task}\n\n"
+                f"The browser is already open and ready. "
+                f"{'You are on: ' + start_url if start_url else 'Begin immediately.'} "
+                f"Do NOT call open_web_browser. Start the task directly."
+            ))],
         )
     ]
 
@@ -222,6 +293,28 @@ async def run_agent_loop(
 
             if "TASK COMPLETE:" in combined_text.upper():
                 summary = combined_text.split("TASK COMPLETE:")[-1].strip() if "TASK COMPLETE:" in combined_text else combined_text
+                
+                # Speak the final result into the Live session before it gets cancelled
+                if live_session_ref is not None and live_session_ref[0] is not None:
+                    completion_msg = (
+                        f"All done! {summary}"
+                        if grandparents_mode
+                        else f"Task complete. {summary}"
+                    )
+                    try:
+                        await live_session_ref[0].send_client_content(
+                            turns=types.Content(parts=[types.Part(text=completion_msg)])
+                        )
+                    except Exception:
+                        pass
+
+                # Signal live_stream.py to stop its screenshot loop cleanly
+                if completion_text_ref is not None:
+                    completion_text_ref[0] = summary
+
+                # Wait for audio to generate and queue before the live stream is cancelled
+                await asyncio.sleep(4.0)
+
                 await ws_manager.send_task_complete(session_id, summary)
                 await update_session_state(session_id, "completed", summary)
                 await _signal_extension_complete(session_id, ws_manager)
@@ -239,14 +332,58 @@ async def run_agent_loop(
                 combined_lower = " ".join(text_parts).lower()
                 completion_words = ["complete", "finished", "done", "successfully", "found", "loaded"]
                 if any(w in combined_lower for w in completion_words):
-                    await ws_manager.send_task_complete(session_id, " ".join(text_parts))
-                    await update_session_state(session_id, "completed", " ".join(text_parts))
+                    summary = " ".join(text_parts)
+                    # Speak the final result into the Live session before it gets cancelled
+                    if live_session_ref is not None and live_session_ref[0] is not None:
+                        completion_msg = (
+                            f"All done! {summary}"
+                            if grandparents_mode
+                            else f"Task complete. {summary}"
+                        )
+                        try:
+                            await live_session_ref[0].send_client_content(
+                                turns=types.Content(parts=[types.Part(text=completion_msg)])
+                            )
+                        except Exception:
+                            pass
+
+                    # Signal live_stream.py to stop its screenshot loop cleanly
+                    if completion_text_ref is not None:
+                        completion_text_ref[0] = summary
+
+                    # Wait for audio to generate and queue before the live stream is cancelled
+                    await asyncio.sleep(4.0)
+
+                    await ws_manager.send_task_complete(session_id, summary)
+                    await update_session_state(session_id, "completed", summary)
                     await _signal_extension_complete(session_id, ws_manager)
                     return
             
             nudge_count += 1
             if nudge_count >= 2:
-                await ws_manager.send_task_complete(session_id, "Task appears complete.")
+                summary = "Task appears complete."
+                # Speak the final result into the Live session before it gets cancelled
+                if live_session_ref is not None and live_session_ref[0] is not None:
+                    completion_msg = (
+                        f"All done! {summary}"
+                        if grandparents_mode
+                        else f"Task complete. {summary}"
+                    )
+                    try:
+                        await live_session_ref[0].send_client_content(
+                            turns=types.Content(parts=[types.Part(text=completion_msg)])
+                        )
+                    except Exception:
+                        pass
+
+                # Signal live_stream.py to stop its screenshot loop cleanly
+                if completion_text_ref is not None:
+                    completion_text_ref[0] = summary
+
+                # Wait for audio to generate and queue before the live stream is cancelled
+                await asyncio.sleep(4.0)
+
+                await ws_manager.send_task_complete(session_id, summary)
                 await update_session_state(session_id, "completed", "No-action stop")
                 await _signal_extension_complete(session_id, ws_manager)
                 return
@@ -268,9 +405,29 @@ async def run_agent_loop(
          
         if current_sig == last_action_signature:
             logger.warning(f"Identical actions on turn {turn+1} — stopping")
-            await ws_manager.send_task_complete(
-                session_id, "Task complete — repeated action guard triggered."
-            )
+            summary = "Task complete — repeated action guard triggered."
+            # Speak the final result into the Live session before it gets cancelled
+            if live_session_ref is not None and live_session_ref[0] is not None:
+                completion_msg = (
+                    f"All done! {summary}"
+                    if grandparents_mode
+                    else f"Task complete. {summary}"
+                )
+                try:
+                    await live_session_ref[0].send_client_content(
+                        turns=types.Content(parts=[types.Part(text=completion_msg)])
+                    )
+                except Exception:
+                    pass
+
+            # Signal live_stream.py to stop its screenshot loop cleanly
+            if completion_text_ref is not None:
+                completion_text_ref[0] = summary
+
+            # Wait for audio to generate and queue before the live stream is cancelled
+            await asyncio.sleep(4.0)
+
+            await ws_manager.send_task_complete(session_id, summary)
             await update_session_state(session_id, "completed", "Dedup stop")
             await _signal_extension_complete(session_id, ws_manager)
             return
@@ -333,6 +490,14 @@ async def run_agent_loop(
 
             # Execute the action
             result = await browser.execute_action(action_name, action_args)
+            
+            await _narrate_action(
+                action_name,
+                action_args,
+                last_action_time_ref,
+                live_session_ref,
+                grandparents_mode=grandparents_mode
+            )
 
             # Send action result to frontend
             await ws_manager.send_action(session_id, result, turn + 1)
@@ -368,11 +533,28 @@ async def run_agent_loop(
         await asyncio.sleep(post_nav_sleep)
 
     # Max turns reached
-    await ws_manager.send_status(session_id, "timeout", "Maximum steps reached", grandparents_mode)
-    await ws_manager.send_task_complete(
-        session_id,
-        f"Agent reached the maximum of {settings.MAX_AGENT_TURNS} steps. "
-        "The task may be partially complete."
-    )
-    await update_session_state(session_id, "timeout", "Max turns reached")
+    summary = f"Agent reached the maximum of {settings.MAX_AGENT_TURNS} steps. The task may be partially complete."
+    # Speak the final result into the Live session before it gets cancelled
+    if live_session_ref is not None and live_session_ref[0] is not None:
+        completion_msg = (
+            f"All done! {summary}"
+            if grandparents_mode
+            else f"Task complete. {summary}"
+        )
+        try:
+            await live_session_ref[0].send_client_content(
+                turns=types.Content(parts=[types.Part(text=completion_msg)])
+            )
+        except Exception:
+            pass
+
+    # Signal live_stream.py to stop its screenshot loop cleanly
+    if completion_text_ref is not None:
+        completion_text_ref[0] = summary
+
+    # Wait for audio to generate and queue before the live stream is cancelled
+    await asyncio.sleep(4.0)
+
+    await ws_manager.send_task_complete(session_id, summary)
+    await update_session_state(session_id, "completed", "Max turns reached")
     await _signal_extension_complete(session_id, ws_manager)

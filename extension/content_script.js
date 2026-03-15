@@ -1,5 +1,8 @@
-// content_script.js
-// Responsible for executing actions on the DOM and extracting data
+// MUST BE LINE 1 — prevents re-injection crash on SPA route changes
+if (window.__udaaContentScriptLoaded) {
+    throw new Error('UDAA: content script already loaded — skipping re-injection');
+}
+window.__udaaContentScriptLoaded = true;
 
 window.udaaLastClickedElement = null;
 window._udaaLastClickX = null;
@@ -158,6 +161,92 @@ function _findBestInputCandidate() {
     return null;
 }
 
+// ── Dropdown option selector ─────────────────────────────────────────────────
+// Finds a clickable option inside an open dropdown/listbox by matching text.
+// Used by the select_option action for city pickers, date selectors, etc.
+const DROPDOWN_OPTION_SELECTORS = [
+    // ARIA roles — framework agnostic, highest confidence
+    '[role="listbox"] [role="option"]',
+    '[role="listbox"] li',
+    '[role="combobox"] [role="option"]',
+    '[role="menu"] [role="menuitem"]',
+    '[role="menu"] li',
+    '[role="option"]',
+    // Generic class patterns
+    '[class*="option"]:not([disabled])',
+    '[class*="Option"]:not([disabled])',
+    '[class*="suggestion"]',
+    '[class*="Suggestion"]',
+    '[class*="dropdown"] li',
+    '[class*="Dropdown"] li',
+    '[class*="list-item"]',
+    '[class*="ListItem"]',
+    '[class*="item"]:not([disabled])',
+    // ixigo specific
+    '[class*="autoSuggest"] li',
+    '[class*="autosuggest"] li',
+    '[class*="AutoSuggest"] li',
+    // MakeMyTrip specific
+    '[class*="makeFlex"] li',
+    '[class*="airportList"] li',
+    // IRCTC specific
+    '[class*="ui-autocomplete"] li',
+    '.ui-menu-item',
+    // Broad fallback — any visible li that might be an option
+    'ul li',
+    'ol li',
+];
+
+function _findDropdownOption(searchText) {
+    if (!searchText) return null;
+    const needle = searchText.toLowerCase().trim();
+
+    for (const selector of DROPDOWN_OPTION_SELECTORS) {
+        try {
+            const candidates = [...document.querySelectorAll(selector)];
+            const visible = candidates.filter(_isVisible);
+            if (visible.length === 0) continue;
+
+            // Exact match first
+            const exact = visible.find(el =>
+                el.textContent?.trim().toLowerCase() === needle
+            );
+            if (exact) return exact;
+
+            // Starts-with match (e.g. "Delhi" matching "Delhi - Indira Gandhi Airport")
+            const startsWith = visible.find(el =>
+                el.textContent?.trim().toLowerCase().startsWith(needle)
+            );
+            if (startsWith) return startsWith;
+
+            // Contains match (broadest)
+            const contains = visible.find(el =>
+                el.textContent?.trim().toLowerCase().includes(needle)
+            );
+            if (contains) return contains;
+        } catch (e) {
+            continue;
+        }
+    }
+    return null;
+}
+
+// ── Scrollable container finder ──────────────────────────────────────────────
+// Finds the nearest scrollable ancestor — used to scroll inside dropdowns
+// instead of scrolling the whole page.
+function _findScrollableContainer(el) {
+    let node = el?.parentElement;
+    while (node && node !== document.body) {
+        const style = window.getComputedStyle(node);
+        const overflow = style.overflow + style.overflowY;
+        if (/auto|scroll/.test(overflow) && node.scrollHeight > node.clientHeight) {
+            return node;
+        }
+        node = node.parentElement;
+    }
+    return null;
+}
+
 // ── Layer 2: _watchForNewInput (MutationObserver) ────────────────────────────
 // Watches for DOM changes that produce a new typeable input.
 let _activeObserver = null;
@@ -204,11 +293,11 @@ function _watchForNewInput(timeoutMs = 700) {
             }
         });
 
-        _activeObserver.observe(document.body, {
+        _activeObserver.observe(document.documentElement, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'display'],
+            attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'display', 'aria-modal', 'aria-expanded'],
         });
 
         // Hard timeout fallback
@@ -304,11 +393,18 @@ async function executeAction(action, args) {
         if (args.x !== undefined || args.coordinates) {
             const { x, y } = _scaleCoords(args);
             window.udaa.performClick(x, y);
-            // Give the pre-arm observer a 100ms head start
-            // before performType calls _resolveTypeTarget
             await new Promise(r => setTimeout(r, 100));
         }
-        return await window.udaa.performType(args.text);  // MUST be awaited
+        const typeResult = await window.udaa.performType(args.text);
+
+        // Handle press_enter flag that Gemini sends as a separate boolean arg
+        // Without this, searches and form submissions never fire after typing
+        if (args.press_enter === true) {
+            await new Promise(r => setTimeout(r, 80));
+            const active = document.activeElement;
+            if (active) _fireEnter(active);
+        }
+        return typeResult;
 
     } else if (action === "get_current_url") {
         return { url: window.location.href };
@@ -328,12 +424,73 @@ async function executeAction(action, args) {
         return window.udaa.performKeyCombination(args.keys || []);
 
     } else if (action === "scroll_document" || action === "scroll") {
-        return window.udaa.performScroll(args.direction || "down", args.amount || 3);
+        // If an elevated scrollable container is visible (open dropdown),
+        // scroll that instead of the page
+        try {
+            const elevated = [...document.querySelectorAll('*')].filter(el => {
+                if (!_isVisible(el)) return false;
+                const s = window.getComputedStyle(el);
+                return /auto|scroll/.test(s.overflow + s.overflowY)
+                    && el.scrollHeight > el.clientHeight
+                    && _hasElevatedAncestor(el);
+            });
+            if (elevated.length > 0) {
+                const delta = (args.direction || 'down') === 'down'
+                    ? (args.amount || 3) * 80
+                    : -(args.amount || 3) * 80;
+                elevated[0].scrollBy({ top: delta, behavior: 'smooth' });
+                console.log('UDAA: Scrolled elevated container — dropdown scroll');
+                return true;
+            }
+        } catch (e) {
+            // Fall through to page scroll
+        }
+        return window.udaa.performScroll(args.direction || 'down', args.amount || 3);
 
     } else if (action === "scroll_at") {
         const { x, y } = _scaleCoords(args);
+        const viewX = x - window.scrollX;
+        const viewY = y - window.scrollY;
+        const el = document.elementFromPoint(viewX, viewY);
+        const container = el ? _findScrollableContainer(el) : null;
+        if (container) {
+            const delta = (args.direction || 'down') === 'down'
+                ? (args.amount || 3) * 80
+                : -(args.amount || 3) * 80;
+            container.scrollBy({ top: delta, behavior: 'smooth' });
+            console.log('UDAA: Scrolled container:', container.className?.slice(0, 40));
+            return true;
+        }
+        // No scrollable container found — hover then scroll page
         window.udaa.performHover(x, y);
-        return window.udaa.performScroll(args.direction || "down", args.amount || 3);
+        return window.udaa.performScroll(args.direction || 'down', args.amount || 3);
+
+        // NEW: select a named option from an open dropdown
+        // Gemini should call this when it needs to pick a city, date, or list item
+    } else if (action === "select_option" || action === "click_option") {
+        const searchText = args.text || args.value || args.option || '';
+        const option = _findDropdownOption(searchText);
+        if (option) {
+            option.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            await new Promise(r => setTimeout(r, 60));
+            // Full event sequence for React/Vue compatibility
+            const rect = option.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            const eInit = { bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+            option.dispatchEvent(new MouseEvent('mousedown', eInit));
+            option.dispatchEvent(new MouseEvent('mouseup', eInit));
+            option.dispatchEvent(new MouseEvent('click', eInit));
+            console.log('UDAA: Selected option:', option.textContent?.trim().slice(0, 50));
+            return true;
+        }
+        console.warn('UDAA: select_option — no match found for:', searchText);
+        // Fallback: try clicking at given coordinates
+        if (args.x !== undefined || args.coordinates) {
+            const { x, y } = _scaleCoords(args);
+            return window.udaa.performClick(x, y);
+        }
+        return false;
     }
     return false;
 }
@@ -368,8 +525,8 @@ window.udaa = {
                 view: window,
                 bubbles: true,
                 cancelable: true,
-                clientX: x,
-                clientY: y,
+                clientX: viewportX,
+                clientY: viewportY,
                 button: 0,
                 buttons: 1
             };
@@ -628,11 +785,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 } else if (type === 'completed') {
                     banner.style.border = "2px solid #2ecc71";
                     banner.style.color = "#2ecc71";
-                    banner.textContent = msg;
-                    // Wait 3s so user can read it, THEN remove
-                    setTimeout(() => { if (banner && banner.parentNode) banner.remove(); }, 3000);
-                    // Also clear the pulsing animation if any
                     banner.style.animation = 'none';
+                    banner.textContent = msg;
+                    // Wait 4s so user can read it, THEN remove
+                    setTimeout(() => { if (banner && banner.parentNode) banner.remove(); }, 4000);
                 } else {
                     banner.style.border = "2px solid #e74c3c";
                     banner.style.color = "#e74c3c";
@@ -648,6 +804,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const msg = `About to: ${request.payload.text}`;
             if (window.udaaOverlay && typeof window.udaaOverlay.showStatus === 'function') {
                 window.udaaOverlay.showStatus(msg, 'active');
+            } else {
+                // Fallback: show preview in the native banner if overlay.js is CSP-blocked
+                let banner = document.getElementById("udaa-status-banner-fallback");
+                if (!banner) {
+                    banner = document.createElement("div");
+                    banner.id = "udaa-status-banner-fallback";
+                    banner.style.position = "fixed";
+                    banner.style.bottom = "20px";
+                    banner.style.right = "20px";
+                    banner.style.padding = "12px 20px";
+                    banner.style.borderRadius = "8px";
+                    banner.style.backgroundColor = "#1a1a2e";
+                    banner.style.color = "#00f2fe";
+                    banner.style.border = "2px solid #00f2fe";
+                    banner.style.fontFamily = "sans-serif";
+                    banner.style.fontSize = "14px";
+                    banner.style.fontWeight = "bold";
+                    banner.style.zIndex = "999999";
+                    banner.style.boxShadow = "0 4px 15px rgba(0,0,0,0.5)";
+                    document.body.appendChild(banner);
+                }
+                banner.textContent = msg;
+                banner.style.color = "#00f2fe";
+                banner.style.border = "2px solid #00f2fe";
             }
         }
     }

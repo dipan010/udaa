@@ -1,6 +1,19 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { AgentStatus, AgentAction, SafetyConfirmRequest, PausePromptData } from '../lib/types';
 
+let _audioCtx: AudioContext | null = null;
+function getAudioContext(sampleRate = 24000): AudioContext {
+    if (!_audioCtx || _audioCtx.state === "closed") {
+        _audioCtx = new AudioContext({ sampleRate });
+    }
+    // Browser requires user gesture to resume — handle suspended state
+    if (_audioCtx.state === "suspended") {
+        _audioCtx.resume();
+    }
+    return _audioCtx;
+}
+
+
 interface UseWebSocketReturn {
     isConnected: boolean;
     status: AgentStatus;
@@ -13,7 +26,7 @@ interface UseWebSocketReturn {
     pausePrompt: PausePromptData | null;
     taskSummary: string | null;
     error: string | null;
-    startTask: (task: string, start_url: string, patienceMode?: boolean, grandparentsMode?: boolean) => void;
+    startTask: (task: string, start_url: string, patienceMode?: boolean, grandparentsMode?: boolean, narrationEnabled?: boolean) => void;
     sendSafetyResponse: (request_id: string, approved: boolean) => void;
     cancelTask: () => void;
 }
@@ -35,6 +48,28 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const reconnectAttempts = useRef(0);
     const intentionalClose = useRef(false);
+
+    const audioQueue = useRef<AudioBuffer[]>([]);
+    const isPlayingAudio = useRef(false);
+
+    const playNext = useCallback(() => {
+        if (isPlayingAudio.current || audioQueue.current.length === 0) return;
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
+        const buffer = audioQueue.current.shift();
+        if (!buffer) return;
+
+        isPlayingAudio.current = true;
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.onended = () => {
+            isPlayingAudio.current = false;
+            playNext();
+        };
+        source.start();
+    }, []);
 
     const connect = useCallback(() => {
         if (!sessionId) return;
@@ -109,6 +144,44 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
                         setTaskSummary(data.summary);
                         break;
 
+                    case "audio_narration": {
+                        const { audio, sample_rate } = message.data;
+
+                        try {
+                            // Decode base64
+                            const raw = atob(audio);
+                            if (raw.length < 2) break;
+
+                            const buf = new ArrayBuffer(raw.length);
+                            const view = new Uint8Array(buf);
+                            for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
+
+                            const pcm = new Int16Array(buf);
+                            if (pcm.length === 0) break;
+
+                            const float32 = new Float32Array(pcm.length);
+                            for (let i = 0; i < pcm.length; i++) {
+                                float32[i] = pcm[i] / 32768.0;
+                            }
+
+                            const ctx = getAudioContext(sample_rate ?? 24000);
+
+                            // Validate before creating buffer
+                            if (!isFinite(float32.length) || float32.length === 0) break;
+
+                            const audioBuf = ctx.createBuffer(1, float32.length, ctx.sampleRate);
+                            audioBuf.copyToChannel(float32, 0);
+
+                            // Push to queue instead of playing immediately
+                            audioQueue.current.push(audioBuf);
+                            playNext();
+                        } catch (e) {
+                            console.warn("Audio chunk skipped:", e);
+                        }
+                        break;
+                    }
+
+
                     case 'error':
                         setStatus('error');
                         setError(data.message);
@@ -167,7 +240,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
 
     // --- Actions ---
 
-    const startTask = useCallback((task: string, start_url: string, patienceMode: boolean = false, grandparentsMode: boolean = false) => {
+    const startTask = useCallback((task: string, start_url: string, patienceMode: boolean = false, grandparentsMode: boolean = false, narrationEnabled: boolean = true) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             setError('Not connected to backend');
             return;
@@ -185,7 +258,7 @@ export function useWebSocket(sessionId: string | null): UseWebSocketReturn {
 
         wsRef.current.send(JSON.stringify({
             type: 'task_start',
-            data: { task, start_url, execution_mode: "live", patience_mode: patienceMode, grandparents_mode: grandparentsMode }
+            data: { task, start_url, execution_mode: "live", patience_mode: patienceMode, grandparents_mode: grandparentsMode, narration_enabled: narrationEnabled }
         }));
     }, []);
 
